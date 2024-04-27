@@ -1,0 +1,214 @@
+--[[
+    MIT License
+
+    Copyright (c) 2024 Pika Software
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+--]]
+import type, tostring from _G
+import byte, sub, gsub from string
+import Error from include "error.lua"
+
+export class RangeError extends Error
+
+CERTAINLY_NOT_NESTED = false
+MIGHT_BE_NESTED = true
+
+SPACE = 0x20 -- [space]
+SCOLON = 0x3B -- ;
+COMMA = 0x2C -- ,
+EQUALS = 0x3D -- =
+QUOTE = 0x22 -- "
+PCT = 0x25 -- %
+LEFT = 0x5B -- [
+RIGHT = 0x5D -- ]
+AMP = 0x26 -- &
+PLUS = 0x2B -- +
+INT_START = 0x30 -- 0
+INT_END = 0x39 -- 10
+
+
+-- https://github.com/petkaantonov/querystringparser
+export class QueryStringParser
+    maxLength: 32768
+    maxDepth: 4
+    maxKeys: 256
+
+    parse: (str) =>
+        if type(str) == "string"
+            if #str > @maxLength
+                error RangeError("str is too large (QueryStringParser.maxLength=#{@maxLength})")
+            
+            return @parseString(str, false)
+        return {}
+
+    decode: (str, shouldDecode, containsPlus) =>
+        if not shouldDecode
+            return str
+        if containsPlus
+            str = gsub(str, "%+", " ")
+        return str -- FIXME: decodeURIComponent(str)
+
+    placeNestedValue: (dictonary, key, value, i, prevKey, curKey) =>
+        error Error "Not implemented"
+
+    insert: (dictonary, key, value) =>
+        if prev := dictonary[key]
+            if type(prev) == "table"
+                prev[] = value
+                return prev
+            else
+                new = [prev, value]
+                dictonary[key] = new
+                return new
+        else
+            dictonary[key] = value
+
+    push: (dictonary, key, value) =>
+        if prev := dictonary[key]
+            prev[] = value
+            return prev
+        new = {value}
+        dictonary[key] = new
+        return new
+
+    maybePlaceNestedValue: (dictonary, key, value) =>
+        len = #key
+        if byte(key, len) != RIGHT
+            @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
+            return 
+
+        start = -1
+        i = 1
+        curKey = nil
+        prevKey = nil
+
+        while i <= len
+            ch = byte(key, i)
+            if ch == LEFT
+                start = i + 1
+                prevKey = sub(key, 1, i)
+            else if ch == RIGHT
+                if start == -1
+                    @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
+                    return
+                curKey = start == i and "" or sub(key, start, i)
+                i += 1
+                break
+            i += 1
+
+        if curKey == nil
+            @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
+            return
+
+        if curKey == "" and value != "" and i == len
+            if key == @cacheKey
+                @cacheValue[] = value
+            else
+                @cacheKey = key
+                @cacheValue = @push(dictonary, prevKey, value)
+        else
+            @placeNestedValue(dictonary, key, value, i, prevKey, curKey) -- TODO
+
+    placeValue: (dictonary, key, value, possiblyNested) =>
+        if possiblyNested == MIGHT_BE_NESTED
+            @maybePlaceNestedValue(dictonary, key, value)
+            return
+        if key == @cacheKey
+            @cacheValue[] = value
+            return
+        if cache := @insert(dictonary, key, value)
+            @cacheKey = key
+            @cacheValue = cache
+
+    parseString: (str, noDecode) =>
+        keys = 0
+        decodeKey = false
+        decodeValue = false
+        possiblyNested = CERTAINLY_NOT_NESTED
+        len = #str
+        i = 1
+        dictonary = {}
+        keyStart = 1
+        keyEnd = 1
+        valueStart = 1
+        valueEnd = 1
+        left = 0
+        containsPlus = false
+
+        while i <= len
+            ch = byte(str, i)
+
+            if ch == LEFT
+                left += 1
+            else if left > 0 and ch == RIGHT
+                possiblyNested = MIGHT_BE_NESTED
+                left -= 1
+            else if left == 0 and ch == EQUALS
+                keyEnd = i - 1
+                valueEnd = valueStart = i + 1
+                key = sub(str, keyStart, keyEnd)
+                key = @decode(key, decodeKey, containsPlus)
+                decodeKey = false
+
+                for j = valueStart, len
+                    ch = byte(str, j)
+
+                    if (ch == PLUS or ch == PCT) and not noDecode
+                        if (ch == PLUS) then containsPlus = true
+                        decodeValue = true
+                    if ch == AMP or j == len
+                        valueEnd = j
+                        i = j
+                        if ch == AMP
+                            valueEnd -= 1
+
+                        value = sub(str, valueStart, valueEnd)
+                        value = @decode(value, decodeValue, containsPlus)
+
+                        -- Place value
+                        @placeValue(dictonary, key, value, possiblyNested)
+
+                        containsPlus = decodeValue = false
+                        possiblyNested = CERTAINLY_NOT_NESTED
+
+                        keyStart = j + 1
+                        keys += 1
+                        if (keys > @maxKeys)
+                            error RangeError("too many keys (QueryStringParser.maxKeys=#{@maxKeys})")
+                        break
+            else if (ch == PLUS or ch == PCT) and not noDecode
+                if ch == PLUS then containsPlus = true
+                decodeKey = true
+            i += 1
+
+        if keyStart != len
+            key = sub(str, keyStart, len)
+            key = @decode(key, decodeKey, containsPlus)
+            @placeValue(dictonary, key, "", possiblyNested)
+
+        if @containsSparse
+            -- TODO compact
+
+        return dictonary
+
+
+print "result"
+PrintTable QueryStringParser!\parse("foo=bar&baz=qux&baz=quux&corge")
+
