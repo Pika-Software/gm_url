@@ -21,9 +21,10 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 --]]
-import type, tostring from _G
-import byte, sub, gsub from string
-import Error from include "error.lua"
+import type, tostring, tonumber from _G
+import byte, char, sub, gsub, match from string
+import concat from table
+import Error, TypeError from include "error.lua"
 
 export class RangeError extends Error
 
@@ -43,6 +44,34 @@ PLUS = 0x2B -- +
 INT_START = 0x30 -- 0
 INT_END = 0x39 -- 10
 
+-- Lookup table for decoding percent-encoded characters and encoding special characters
+-- Using HEX_TABLE will result in a double speedup compared to using functions
+HEX_TABLE = []
+for i = 0x00, 0xFF
+    hex = bit.tohex(i, 2)
+    HEX_TABLE[hex] = char(i)
+    HEX_TABLE[hex\upper!] = char(i)
+    HEX_TABLE[char(i)] = "%" .. hex\upper!
+-- Special characters
+HEX_TABLE["\r\n"] = "\n"
+HEX_TABLE[" "] = "+"
+HEX_TABLE["-"] = "-"
+HEX_TABLE["."] = "."
+HEX_TABLE["_"] = "_"
+HEX_TABLE["~"] = "~"
+HEX_TABLE["!"] = "!"
+HEX_TABLE["*"] = "*"
+HEX_TABLE["'"] = "'"
+HEX_TABLE["("] = "("
+HEX_TABLE[")"] = ")"
+
+export decodeURI = (s) -> 
+    s = gsub(s, "%%(%x%x)", HEX_TABLE) |> gsub("+", " ")
+    return s
+
+export encodeURI = (s) ->
+    s = gsub(s, "%W", HEX_TABLE)
+    return s
 
 -- https://github.com/petkaantonov/querystringparser
 export class QueryStringParser
@@ -51,22 +80,134 @@ export class QueryStringParser
     maxKeys: 256
 
     parse: (str) =>
+        @containsSparse = false
+        @cacheKey = ""
+        @cacheVal = nil
+
         if type(str) == "string"
             if #str > @maxLength
                 error RangeError("str is too large (QueryStringParser.maxLength=#{@maxLength})")
             
             return @parseString(str, false)
+        else if type(str) == "table"
+            error Error "not implemented"
         return {}
+
+    stringify: (obj) =>
+        if type(obj) != "table"
+            error TypeError "obj must be a table"
+
+        keyPrefix = ""
+        cur = obj
+        key = nil
+        value = nil
+        isArray = false -- please do not pass array as first argument :)
+        stack = []
+        stackLen = 0
+        ret = []
+
+        -- spooky spooky while true loop :)
+        while true
+            if isArray
+                key += 1
+                value = cur[key]
+                if not value
+                    key = nil
+            else
+                key, value = next(cur, key)
+
+            if key != nil
+                serializedKey = encodeURI( isArray and tostring(key - 1) or tostring(key) )
+                if type(value) == "table"
+                    stack[stackLen + 1] = keyPrefix
+                    stack[stackLen + 2] = cur
+                    stack[stackLen + 3] = key
+                    stack[stackLen + 4] = isArray
+                    stackLen += 4
+
+                    keyPrefix = keyPrefix == "" and serializedKey or keyPrefix .. "[" .. serializedKey .. "]"
+                    isArray = value[1] and true or false -- usually this is enough to determine if table is an array
+                    key = isArray and 0 or nil
+                    cur = value
+                else
+                    serializedKey = keyPrefix == "" and serializedKey or keyPrefix .. "[" .. serializedKey .. "]"
+                    ret[] = serializedKey .. "=" .. encodeURI(value)
+            else if stackLen != 0
+                keyPrefix = stack[stackLen - 3]
+                cur = stack[stackLen - 2]
+                key = stack[stackLen - 1]
+                isArray = stack[stackLen]
+                stackLen -= 4
+            else
+                break
+
+        return concat(ret, "&")
+
 
     decode: (str, shouldDecode, containsPlus) =>
         if not shouldDecode
             return str
         if containsPlus
             str = gsub(str, "%+", " ")
-        return str -- FIXME: decodeURIComponent(str)
+        return decodeURI(str)
+
+    maybeArrayIndex: (str, arrayLength) =>
+        len = #str
+        -- Empty string I.E. direct brackets [] means index will be .length
+        if len == 0
+            return arrayLength
+        
+        ch = byte(str, 1)
+
+        -- "0" is only valid index if it's the only character in the string
+        -- "00", "001", are not valid array indices
+        if ch == INT_START
+            return len > 1 and -1 or 1
+        else if INT_START <= ch and ch <= INT_END
+            -- Single digit number 1-9
+            if len == 1
+                return ch - INT_START + 1
+            else if match(str, "^%d+$")
+                return tonumber(str) + 1
+        return -1
+
+    getSlot: (dictonary, prevKey, curKey) =>
+        if not dictonary[prevKey]
+            dictonary[prevKey] = {}
+        return dictonary[prevKey]
 
     placeNestedValue: (dictonary, key, value, i, prevKey, curKey) =>
-        error Error "Not implemented"
+        slot = @getSlot(dictonary, prevKey, curKey)
+        index = @maybeArrayIndex(curKey, #slot)
+
+        len = #key
+        depth = 2
+        maxDepth = @maxDepth
+        start = -1
+        while (i <= len)
+            ch = byte(key, i)
+            if ch == LEFT
+                start = i + 1
+            else if ch == RIGHT and start != -1
+                prevKey = curKey
+                curKey = start == i and "" or sub(key, start, i - 1)
+                start = -1
+                depth += 1
+                if depth > maxDepth
+                    error RangeError("too deep (QueryStringParser.maxDepth=#{maxDepth})")
+                slot = @getSlot(slot, prevKey, curKey)
+                index = @maybeArrayIndex(curKey, #slot)
+            i += 1
+
+        if index != -1
+            if value != ""
+                if index == (#slot + 1)
+                    slot[] = value
+                else
+                    @containsSparse = true
+                    slot[index] = value
+        else
+            @insert(slot, curKey, value)
 
     insert: (dictonary, key, value) =>
         if prev := dictonary[key]
@@ -103,12 +244,12 @@ export class QueryStringParser
             ch = byte(key, i)
             if ch == LEFT
                 start = i + 1
-                prevKey = sub(key, 1, i)
+                prevKey = sub(key, 1, i - 1)
             else if ch == RIGHT
                 if start == -1
                     @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
                     return
-                curKey = start == i and "" or sub(key, start, i)
+                curKey = start == i and "" or sub(key, start, i - 1)
                 i += 1
                 break
             i += 1
@@ -124,7 +265,7 @@ export class QueryStringParser
                 @cacheKey = key
                 @cacheValue = @push(dictonary, prevKey, value)
         else
-            @placeNestedValue(dictonary, key, value, i, prevKey, curKey) -- TODO
+            @placeNestedValue(dictonary, key, value, i, prevKey, curKey)
 
     placeValue: (dictonary, key, value, possiblyNested) =>
         if possiblyNested == MIGHT_BE_NESTED
@@ -136,6 +277,21 @@ export class QueryStringParser
         if cache := @insert(dictonary, key, value)
             @cacheKey = key
             @cacheValue = cache
+
+    compact: (obj) =>
+        if type(obj) != "table"
+            return obj
+    
+        if obj[1] -- probably an array
+            ret = []
+            for _, v in pairs obj
+                ret[] = v
+            return ret
+        else
+            for k, v in pairs obj
+                obj[k] = @compact(v)
+            return obj
+
 
     parseString: (str, noDecode) =>
         keys = 0
@@ -198,17 +354,14 @@ export class QueryStringParser
                 decodeKey = true
             i += 1
 
-        if keyStart != len
+        if keyStart < len
             key = sub(str, keyStart, len)
             key = @decode(key, decodeKey, containsPlus)
             @placeValue(dictonary, key, "", possiblyNested)
 
         if @containsSparse
-            -- TODO compact
+            -- original developer once said 
+            -- This behavior is pretty stupid but what you gonna do
+            @compact(dictonary)
 
         return dictonary
-
-
-print "result"
-PrintTable QueryStringParser!\parse("foo=bar&baz=qux&baz=quux&corge")
-
