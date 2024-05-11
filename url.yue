@@ -21,21 +21,15 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 --]]
-import type, tostring, tonumber from _G
-import byte, char, sub, gsub, match from string
-import concat from table
-import Error, TypeError from include "error.lua"
-
-export class RangeError extends Error
+import type, tostring, tonumber, string, table from _G
+import byte, char, sub, gsub, match, find, lower, Split from string
+import concat, insert, remove from table
 
 CERTAINLY_NOT_NESTED = false
 MIGHT_BE_NESTED = true
 
-SPACE = 0x20 -- [space]
-SCOLON = 0x3B -- ;
 COMMA = 0x2C -- ,
 EQUALS = 0x3D -- =
-QUOTE = 0x22 -- "
 PCT = 0x25 -- %
 LEFT = 0x5B -- [
 RIGHT = 0x5D -- ]
@@ -43,6 +37,34 @@ AMP = 0x26 -- &
 PLUS = 0x2B -- +
 INT_START = 0x30 -- 0
 INT_END = 0x39 -- 10
+
+makeAsciiTable = (spec) ->
+    ret = {}
+    for item in *spec
+        if type(item) == "number"
+            ret[item] = true
+        else
+            for j = item[1], item[2]
+                ret[j] = true
+    return ret
+
+containsCharacter = (string, char1, fromIndex, stopCharacterTable) ->
+    len = #string
+    for i = fromIndex, len
+        ch = byte(string, i)
+        if ch == char1
+            return true
+        if stopCharacterTable[ch]
+            return false
+    return false
+
+containsCharacter2 = (string, char1, char2) ->
+    len = #string
+    for i = 1, len
+        ch = byte(string, i)
+        if ch == char1 or ch == char2
+            return true
+    return false
 
 -- Lookup table for decoding percent-encoded characters and encoding special characters
 -- Using HEX_TABLE will result in a double speedup compared to using functions
@@ -73,6 +95,20 @@ export encodeURI = (s) ->
     s = gsub(s, "%W", HEX_TABLE)
     return s
 
+autoEscape = ["<", ">", "\"", "`", " ", "\r", "\n",
+    "\t", "{", "}", "|", "\\", "^", "`", "'"]
+
+autoEscapeMap = []
+
+for c in *autoEscape
+    esc = encodeURI(c)
+    if esc == c
+        esc = "%" .. bit.tohex(byte(c), 2)\upper!
+    autoEscapeMap[byte(c)] = esc
+
+afterQueryAutoEscapeMap = table.Copy(autoEscapeMap)
+autoEscapeMap[0x5C --[['\']]] = "/"
+
 -- https://github.com/petkaantonov/querystringparser
 export class QueryStringParser
     maxLength: 32768
@@ -86,16 +122,16 @@ export class QueryStringParser
 
         if type(str) == "string"
             if #str > @maxLength
-                error RangeError("str is too large (QueryStringParser.maxLength=#{@maxLength})")
+                error "str is too large (QueryStringParser.maxLength=#{@maxLength})"
             
             return @parseString(str, false)
         else if type(str) == "table"
-            error Error "not implemented"
+            error "not implemented"
         return {}
 
     stringify: (obj) =>
         if type(obj) != "table"
-            error TypeError "obj must be a table"
+            error "obj must be a table"
 
         keyPrefix = ""
         cur = obj
@@ -194,7 +230,7 @@ export class QueryStringParser
                 start = -1
                 depth += 1
                 if depth > maxDepth
-                    error RangeError("too deep (QueryStringParser.maxDepth=#{maxDepth})")
+                    error "too deep (QueryStringParser.maxDepth=#{maxDepth})"
                 slot = @getSlot(slot, prevKey, curKey)
                 index = @maybeArrayIndex(curKey, #slot)
             i += 1
@@ -347,7 +383,7 @@ export class QueryStringParser
                         keyStart = j + 1
                         keys += 1
                         if (keys > @maxKeys)
-                            error RangeError("too many keys (QueryStringParser.maxKeys=#{@maxKeys})")
+                            error "too many keys (QueryStringParser.maxKeys=#{@maxKeys})"
                         break
             else if (ch == PLUS or ch == PCT) and not noDecode
                 if ch == PLUS then containsPlus = true
@@ -365,3 +401,713 @@ export class QueryStringParser
             @compact(dictonary)
 
         return dictonary
+
+-- https://github.com/petkaantonov/urlparser
+export class URL
+    queryString: QueryStringParser!
+
+    _protocolCharacters: makeAsciiTable([
+        [0x61, 0x7A], -- a-z
+        [0x41, 0x5A], -- A-Z
+        0x2E --[['.']], 0x2B --[['+']], 0x2D --[['-']]
+    ])
+    _hostEndingCharacters: makeAsciiTable([ 0x23 --[['#']], 0x3F --[['?']], 0x2F --[['/']], 0x5C --[['\']]])
+    -- If these characters end a host name, the path will not be prepended a /
+    _noPrependSlashHostEnders: makeAsciiTable([ byte(s) for s in *[
+        "<", ">", "'", "`", " ", "\r",
+        "\n", "\t", "{", "}", "|",
+        "^", "`", "\"", "%", ";"
+    ] ])
+    _autoEscapeCharacters: makeAsciiTable([ byte(s) for s in *autoEscape ])
+
+    _autoEscapeMap: autoEscapeMap
+    _afterQueryAutoEscapeMap: afterQueryAutoEscapeMap
+
+    _slashProtocols:
+        http: true
+        https: true
+        gopher: true
+        file: true
+        ftp: true
+        "http:": true
+        "https:": true
+        "gopher:": true
+        "file:": true
+        "ftp:": true
+
+    new: =>
+        -- For more efficient internal representation and laziness.
+        -- The non-underscore versions of these properties are accessor functions
+        -- defined on the prototype.
+        @_protocol = nil
+        @_href = ""
+        @_port = -1
+        @_query = nil
+
+        -- Probably just should remove these properties
+        @auth = nil
+        @slashes = false
+        @host = nil
+        @hostname = nil
+        @hash = nil
+        @search = nil
+        @pathname = nil
+
+        @_prependSlash = false
+
+    parse: (str, parseStringQuery, hostDenotesSlash, disableAutoEscapeChars) =>
+        if type(str) != "string"
+            error "Parameter 'url' must be a string, not " .. type(str)
+
+        startPos = 1
+        endPos = #str
+
+        -- Trim leading and trailing whitespaces
+        while byte(str, startPos) <= 0x20 --[[ space ]] do startPos += 1
+        while byte(str, endPos) <= 0x20 --[[ space ]] do endPos -= 1
+
+        startPos = @_parseProtocol(str, startPos, endPos)
+
+        -- Javascript does not have host
+        if @_protocol != "javascript"
+            startPos = @_parseHost(str, startPos, endPos, hostDenotesSlash)
+            proto = @_protocol
+            if not @hostname and (@slashes and (proto and not @_slashProtocols[proto]))
+                @hostname = @host = ""
+
+        if startPos <= endPos
+            ch = byte(str, startPos)
+            if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
+                @_parsePath(str, startPos, endPos, disableAutoEscapeChars)
+            else if ch == 0x3F --[['?']]
+                @_parseQuery(str, startPos, endPos, disableAutoEscapeChars)
+            else if ch == 0x23 --[['#']]
+                @_parseHash(str, startPos, endPos, disableAutoEscapeChars)
+            else if @_protocol != "javascript"
+                @_parsePath(str, startPos, endPos, disableAutoEscapeChars)
+            else
+                @pathname = sub(str, startPos, endPos)
+
+        if not @pathname and @hostname and @_slashProtocols[@_protocol]
+            @pathname = "/"
+
+        if parseStringQuery
+            search = @search
+            if not search
+                search = @search = ""
+            if byte(search, 0) == 0x3F -- '?'
+                search = sub(search, 2)
+            -- TODO: This calls a setter function, there is no .query data property
+            @query = @queryString\parse(search)
+
+    resolve: (relative) => @resolveObject(URL.parse(relative, false, true))\format!
+
+    _escapePathname: (pathname) => return gsub(pathname, "[%?#]", HEX_TABLE)
+    _escapeSearch: (search) => return gsub(search, "#", HEX_TABLE)
+
+    format: () =>
+        auth = @auth or ""
+        if auth != ""
+            auth = encodeURI(auth)
+            auth = gsub(auth, "%%3A", ":")
+            auth ..= "@"
+
+        protocol = @_protocol or ""
+        pathname = @pathname or ""
+        hash = @hash or ""
+        search = @search or ""
+        query = @query or ""
+        hostname = @hostname or ""
+        port = @_port or ""
+        host = false
+        scheme = ""
+
+        q = @query
+        if type(q) == "table"
+            query = @queryString\stringify(q)
+        
+        if search == ""
+            search = query != "" and "?" .. query or ""
+        
+        if protocol != "" and byte(protocol, -1) != 0x3A -- ':'
+            protocol = protocol .. ":"
+        
+        if @host
+            host = auth .. @host
+        else if hostname != ""
+            ip6 = find(hostname, ":", 1, true)
+            if ip6
+                hostname = "[" .. hostname .. "]"
+            host = auth .. hostname .. (port != "" and ":" .. port or "")
+
+        slashes = @slashes or ((protocol == "" or @_slashProtocols[protocol]) and host != false)
+        if protocol != ""
+            scheme = protocol .. (slashes and "//" or "/")  
+        else if slashes
+            scheme = "//"
+        
+        if slashes and pathname != "" and byte(pathname, 1) != 0x2F -- '/'
+            pathname = "/" .. pathname
+        if search != "" and byte(search, 1) != 0x3F -- '?'
+            search = "?" .. search
+        if hash != "" and byte(hash, 1) != 0x23 -- '#'
+            hash = "#" .. hash
+
+        pathname = @_escapePathname(pathname)
+        search = @_escapeSearch(search)
+
+        return concat([scheme, host == false and "" or host, pathname, search, hash])
+
+    resolveObject: (relative) =>
+        if type(relative) == "string"
+            relative = URL.parse(relative, false, true)
+
+        result = @_clone!
+
+        -- hash is always overridden, no matter what.
+        -- even href="" will remove it.
+        result.hash = relative.hash
+
+        -- if the relative url is empty, then there"s nothing left to do here.
+        if relative.href == ""
+            result.href = ""
+            return result
+        
+        -- hrefs like //foo/bar always cut to the protocol.
+        if relative.slashes and not relative._protocol
+            relative\_copyPropsTo(result, true)
+            if @_slashProtocols[result._protocol] and result.hostname and not result.pathname
+                result.pathname = "/"
+            result._href = ""
+            return result
+        
+        if relative._protocol and relative._protocol != result._protocol
+            -- if it"s a known url protocol, then changing
+            -- the protocol does weird things
+            -- first, if it"s not file:, then we MUST have a host,
+            -- and if there was a path
+            -- to begin with, then we MUST have a path.
+            -- if it is file:, then the host is dropped,
+            -- because that"s known to be hostless.
+            -- anything else is assumed to be absolute.
+            if @_slashProtocols[relative._protocol]
+                relative\_copyPropsTo(result, false)
+                result._href = ""
+                return result
+            result._protocol = relative._protocol
+            if not relative.host and relative._protocol != "javascript"
+                relPath = Split(relative.pathname or "", "/")
+                while #relPath != 0
+                    host = remove(relPath, 1)
+                    if host and host != ""
+                        relative.host = host
+                        break
+                if not relative.host
+                    relative.host = ""
+                if not relative.hostname
+                    relative.hostname = ""
+                if relPath[1] != ""
+                    insert(relPath, 1, "")
+                if #relPath < 2
+                    insert(relPath, 1, "")
+                result.pathname = concat(relPath, "/")
+            else
+                result.pathname = relative.pathname
+        
+            result.search = relative.search
+            result.host = relative.host or ""
+            result.auth = relative.auth
+            result.hostname = relative.hostname or result.hostname
+            result._port = relative._port
+            result.slashes = relative.slashes
+            result._href = ""
+            return result
+
+        isSourceAbs = result.pathname and byte(result.pathname, 1) == 0x2F -- '/'
+        isRelAbs = not not relative.host or relative.pathname and byte(relative.pathname, 1) == 0x2F -- '/'
+        mustEndAbs = isRelAbs or isSourceAbs or (result.host and relative.pathname)
+        removeAllDots = mustEndAbs
+
+        srcPath = result.pathname and Split(result.pathname, "/") or []
+        relPath = relative.pathname and Split(relative.pathname, "/") or []
+        psychotic = result._protocol and not @_slashProtocols[result._protocol]
+
+        -- if the url is a non-slashed url, then relative
+        -- links like ../.. should be able
+        -- to crawl up to the hostname, as well.  This is strange.
+        -- result.protocol has already been set by now.
+        -- Later on, put the first path part into the host field.
+        if psychotic
+            result.hostname = ""
+            result._port = -1
+            if result.host
+                if srcPath[1] == ""
+                    srcPath[1] = result.host
+                else
+                    insert(srcPath, 1, result.host)
+            result.host = ""
+            if relative._protocol
+                relative.hostname = ""
+                relative._port = -1
+                if relative.host
+                    if relPath[1] == ""
+                        relPath[1] = relative.host
+                    else
+                        insert(relPath, 1, relative.host)
+                relative.host = ""
+            mustEndAbs = mustEndAbs and (relPath[1] == "" or srcPath[1] == "")
+        
+        if isRelAbs
+            -- it's absolute.
+            result.host = relative.host or result.host
+            result.hostname = relative.hostname or result.hostname
+            result.search = relative.search
+            srcPath = relPath
+            -- fall through to the dot-handling below.
+        else if #relPath != 0
+            -- it's relative
+            -- throw away the existing file, and take the new path instead.
+            if not srcPath
+                srcPath = []
+            srcPath[#srcPath] = nil
+            table.Add(srcPath, relPath)
+            result.search = relative.search
+        else if relative.search
+            -- just pull out the search.
+            -- like href="?foo".
+            -- Put this after the other two cases because it simplifies the booleans
+            if psychotic
+                result.hostname = result.host = remove(srcPath, 1)
+                -- occationaly the auth can get stuck only in host
+                -- this especialy happens in cases like
+                -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
+                authInHost = (result.host and (find(result.host, "@", 1, true) or -1) > 0) and Split(Split(result.host)) or false
+                if authInHost
+                    result.auth = authInHost[1]
+                    result.host = result.hostname = authInHost[2]
+            result.search = relative.search
+            result._href = ""
+            return result
+        
+        if #srcPath == 0
+            -- no path at all.  easy.
+            -- we"ve already handled the other stuff above.
+            result.pathname = nil
+            result._href = ""
+            return result
+        
+        -- if a url ENDs in . or .., then it must get a trailing slash.
+        -- however, if it ends in anything else non-slashy,
+        -- then it must NOT get a trailing slash.
+        last = srcPath[#srcPath]
+        hasTrailingSlash = (result.host or relative.host) or (last == "." or last == ".." ) or last == ""
+
+        -- strip single dots, resolve double dots to parent dir
+        -- if the path tries to go above the root, `up` ends up > 0
+        up = 0
+        for i = #srcPath, 1, -1
+            last = srcPath[i]
+            if last == "."
+                remove(srcPath, i)
+            else if last == ".."
+                remove(srcPath, i)
+                up += 1
+            else if up > 0
+                remove(srcPath, i)
+                up -= 1
+        
+        -- if the path is allowed to go above the root, restore leading ..s
+        if not mustEndAbs and not removeAllDots
+            while up > 0
+                insert(srcPath, 1, "..")
+                up -= 1
+        
+        if mustEndAbs and srcPath[1] != "" and (not srcPath[0] or byte(srcPath[1], 1) != 0x2F --[['/']])
+            insert(srcPath, 1, "")        
+        if hasTrailingSlash and (byte( concat(srcPath, "/"), 1 ) != 0x2F --[['/']])
+            srcPath[] = ""
+        
+        isAbsolute = srcPath[1] == "" or (srcPath[0] and byte(srcPath[1], 1) == 0x2F --[['/']])
+
+        -- put the host back
+        if psychotic
+            result.hostname = result.host = isAbsolute and "" or #srcPath > 0 and remove(srcPath, 1) or ""
+            -- occationaly the auth can get stuck only in host
+            -- this especialy happens in cases like
+            -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
+            authInHost = result.host and (find(result.host, "@", 1, true) or -1) > 0 and Split(Split(result.host)) or false
+            if authInHost
+                result.auth = authInHost[1]
+                result.host = result.hostname = authInHost[2]
+        
+        mustEndAbs = mustEndAbs or (result.host and #srcPath > 0)
+
+        if not mustEndAbs and not isAbsolute
+            insert(srcPath, 1, "")
+
+        result.pathname = srcPath != 0 and concat(srcPath, "/") or nil
+        result.auth = relative.auth or result.auth
+        result.slashes = result.slashes or relative.slashes
+        result._href = ""
+        return result
+        
+
+    _hostIdna: (hostname) =>
+        -- TODO: Implement punycode and convert Idna to punycode
+        return encodeURI(hostname)
+
+    _parseProtocol: (str, startPos, endPos) =>
+        doLowerCase = false
+        protocolCharacters = @_protocolCharacters
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x3A --[[ : ]]
+                protocol = sub(str, startPos, i - 1)
+                if doLowerCase
+                    protocol = lower(protocol)
+                @_protocol = protocol
+                return i + 1
+            else if protocolCharacters[ch]
+                if ch < 0x61 --[[ a ]]
+                    doLowerCase = true
+            else
+                break
+        return startPos
+
+    _parseAuth: (str, startPos, endPos, decode) =>
+        auth = sub(str, startPos, endPos)
+        if decode
+            auth = decodeURI(auth)
+        @auth = auth
+    
+    _parsePort: (str, startPos, endPos) =>
+        -- Internal format is integer for more efficient parsing
+        -- and for efficient trimming of leading zeros
+        port = 0
+        -- Distinguish between :0 and : (no port number at all)
+        hadChars = false
+        validPort = true
+        i = startPos
+
+        while i <= endPos
+            ch = byte(str, i)
+            if 0x30 <= ch --[['0']] and ch <= 0x39 -- [['9']]
+                port = (10 * port) + (ch - 0x30 --[['0']])
+                hadChars = true
+            else
+                validPort = false
+                if ch == 0x5C --[['\']] or ch == 0x2F --[['/']]
+                    validPort = true
+                break
+            i += 1
+        
+        if (port == 0 or not hadChars) or not validPort
+            if not validPort
+                @_port = -2
+            return 0
+        
+        @_port = port
+        return i - startPos
+
+    _parseHost: (str, startPos, endPos, slashesDenoteHost) =>
+        hostEndingCharacters = @_hostEndingCharacters
+        first = byte(str, startPos)
+        second = byte(str, startPos + 1)
+        if (first == 0x2F --[[ / ]] or first == 0x5C --[[ \ ]]) and (second == 0x2F --[[ / ]] or second == 0x5C --[[ \ ]])
+            @slashes = true
+
+            -- The string starts with //
+            if startPos == 0
+                -- The string is just "//"
+                if endPos < 2
+                    return startPos
+                -- If slashes do not denote host and there is no auth,
+                -- there is no host when the string starts with //
+                hasAuth = containsCharacter(str, 0x40 --[[ @ ]], 3, hostEndingCharacters)
+                if not slashesDenoteHost and not hasAuth
+                    @slashes = nil
+                    return startPos
+
+            startPos += 2
+        -- If there is no slashes, there is no hostname if
+        -- 1. there was no protocol at all
+        -- 2. there was a protocol that requires slashes
+        -- e.g. in 'http:asd' 'asd' is not a hostname
+        else if not @_protocol or @_slashProtocols[@_protocol]
+            return startPos
+
+        doLowerCase = true
+        idna = false
+        hostNameStart = startPos
+        hostNameEnd = endPos
+        lastCh = -1
+        portLength = 0
+        charsAfterDot = 0
+        authNeedsDecoding = false
+        j = -1
+
+        -- Find the last occurrence of an @-sign until hostending character is met
+        -- also mark if decoding is needed for the auth portion
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x40 -- '@'
+                j = i
+            else if ch == 0x25 -- '%'
+                authNeedsDecoding = true
+            else if hostEndingCharacters[ch]
+                break
+
+        -- @-sign was found at index j, everything to the left from it is auth part
+        if j > -1
+            @_parseAuth(str, startPos, j - 1, authNeedsDecoding)
+            startPos = hostNameStart = j + 1
+        
+        -- Host name is starting with a [
+        if byte(str, startPos) == 0x5B -- '['
+            for i = startPos + 1, endPos
+                ch = byte(str, i)
+                -- Assume valid IP6 is between the brackets
+                if ch == 0x5D -- ']'
+                    if byte(str, i + 1) == 0x3A -- ':'
+                        portLength = @_parsePort(str, i + 2, endPos)
+                    hostname = lower(sub(str, startPos + 1, i - 1))
+                    @hostname = hostname
+                    @host = @_port > 0 and ("[" .. hostname .. "]:" .. @_port) or ("[" .. hostname .. "]")
+                    @pathname = "/"
+                    return i + portLength + 1
+            -- Empty hostname, [ starts a path
+            return startPos
+        
+        for i = startPos, endPos
+            if charsAfterDot > 62
+                @hostname = @host = sub(str, startPos, i)
+                return i
+
+            ch = byte(str, i)
+            if ch == 0x3A -- ':'
+                portLength = @_parsePort(str, i + 1, endPos) + 1
+                hostNameEnd = i - 1
+                break
+            else if ch < 0x61 -- 'a'
+                if ch == 0x2E -- '.'
+                    charsAfterDot = -1
+                else if 0x41 --[['A']] <= ch and ch <= 0x5A --[['Z']]
+                    doLowerCase = false
+                -- Valid characters other than ASCII letters -, _, +, 0-9
+                else if not (ch == 0x2D --[['-']] or ch == 0x5F --[['_']] or ch == 0x2B --[['+']] or (0x30 --[['0']] <= ch and ch <= 0x39 --[['9']]))
+                    if not hostEndingCharacters[ch] and not @_noPrependSlashHostEnders[ch]
+                        @_prependSlash = true
+                    hostNameEnd = i - 1
+                    break
+            else if ch >= 0x7B -- '{'
+                if ch <= 0x7E -- '~'
+                    if not @_noPrependSlashHostEnders[ch]
+                        @_prependSlash = true
+                    hostNameEnd = i - 1
+                    break
+                idna = true
+            lastCh = ch
+            charsAfterDot += 1
+
+        if (hostNameEnd + 1) != startPos and (hostNameEnd - hostNameStart) <= 256
+            hostname = sub(str, hostNameStart, hostNameEnd)
+            if doLowerCase
+                hostname = lower(hostname)
+            if idna
+                hostname = @_hostIdna(hostname)
+            @hostname = hostname
+            @host = @_port > 0 and (hostname .. ":" .. @_port) or hostname
+        return hostNameEnd + 1 + portLength
+
+    _copyPropsTo: (input, noProtocol) =>
+        if not noProtocol
+            input._protocol = @_protocol
+        input._href = @_href
+        input._port = @_port
+        input._prependSlash = @_prependSlash
+        input.auth = @auth
+        input.slashes = @slashes
+        input.host = @host
+        input.hostname = @hostname
+        input.hash = @hash
+        input.search = @search
+        input.pathname = @pathname
+
+    _clone: =>
+        ret = URL!
+        ret._protocol = @_protocol
+        ret._href = @_href
+        ret._port = @_port
+        ret._prependSlash = @_prependSlash
+        ret.auth = @auth
+        ret.slashes = @slashes
+        ret.host = @host
+        ret.hostname = @hostname
+        ret.hash = @hash
+        ret.search = @search
+        ret.pathname = @pathname
+        return ret
+
+    _getComponentEscaped: (str, startPos, endPos, isAfterQuery) =>
+        cur = startPos
+        i = startPos
+        ret = []
+        autoEscapeMap = isAfterQuery and @_afterQueryAutoEscapeMap or @_autoEscapeMap
+        while i <= endPos
+            ch = byte(str, i)
+            escaped = autoEscapeMap[ch]
+            if escaped
+                if cur < i
+                    ret[] = sub(str, cur, i - 1)
+                ret[] = escaped
+                cur = i + 1
+            i += 1
+        if cur < i + 1
+            ret[] = sub(str, cur, i)
+        return concat(ret)
+    
+    _parsePath: (str, startPos, endPos, disableAutoEscapeChars) =>
+        pathStart = startPos
+        pathEnd = endPos
+        escape = false
+        autoEscapeCharacters = @_autoEscapeCharacters
+        prePath = @_port == -2 and "/:" or ""
+
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x23 -- '#'
+                @_parseHash(str, i, endPos, disableAutoEscapeChars)
+                pathEnd = i - 1
+                break
+            else if ch == 0x3F -- '?'
+                @_parseQuery(str, i, endPos, disableAutoEscapeChars)
+                pathEnd = i - 1
+                break
+            else if not disableAutoEscapeChars and not escape and autoEscapeCharacters[ch]
+                escape = true
+        
+        if pathStart > pathEnd
+            @pathname = prePath == "" and "/" or prePath
+            return
+
+        path = nil
+        if escape
+            path = @_getComponentEscaped(str, pathStart, pathEnd, false)
+        else
+            path = sub(str, pathStart, pathEnd)
+        @pathname = prePath == "" and (@_prependSlash and "/" .. path or path) or prePath .. path
+
+    _parseQuery: (str, startPos, endPos, disableAutoEscapeChars) =>
+        queryStart = startPos
+        queryEnd = endPos
+        escape = false
+        autoEscapeCharacters = @_autoEscapeCharacters
+
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x23 -- '#'
+                @_parseHash(str, i, endPos, disableAutoEscapeChars)
+                queryEnd = i - 1
+                break
+            else if not disableAutoEscapeChars and not escape and autoEscapeCharacters[ch]
+                escape = true
+        
+        if queryStart > queryEnd
+            @search = ""
+            return
+
+        query = nil
+        if escape
+            query = @_getComponentEscaped(str, queryStart, queryEnd, true)
+        else
+            query = sub(str, queryStart, queryEnd)
+        @search = query
+
+    _parseHash: (str, startPos, endPos, disableAutoEscapeChars) =>
+        if startPos > endPos
+            @hash = ""
+            return
+
+        @hash = disableAutoEscapeChars and sub(str, startPos, endPos) or @_getComponentEscaped(str, startPos, endPos, false)
+
+    -- properties
+    __index: (key) =>
+        return switch key
+            when "port" then @getPort!
+            when "query" then @getQuery!
+            when "path" then @getPath!
+            when "protocol" then @getProtocol!
+            when "href" then @getHref!
+
+    __newindex: (key, value) =>
+        switch key
+            when "port" then @setPort(value)
+            when "query" then @setQuery(value)
+            when "path" then @setPath(value)
+            when "protocol" then @setProtocol(value)
+            when "href" then @setHref(value)
+
+    getPort: => if @_port >= 0 then return tostring @_port
+    setPort: (value) =>
+        if value == nil then @_port = -1
+        else @_port = tonumber value
+    
+    getQuery: =>
+        if query := @_query
+            return query
+        
+        search = @search
+        if search
+            if byte(search, 1) == 0x3f -- '?'
+                search = sub(search, 2)
+            if search != ""
+                @_query = search
+                return search
+        return search
+    setQuery: (value) => @_query = value
+
+    getPath: =>
+        p = @pathname or ""
+        s = @search or ""
+        return p .. s
+    setPath: -> -- Empty func
+
+    getProtocol: =>
+        proto = @_protocol or ""
+        return proto != "" and proto .. ":" or ""
+    setProtocol: (value) =>
+        if type(value) == "string"
+            if byte(value, -1) == 0x3A -- ':'
+                value = sub(value, 1, -2)
+            else
+                value = value
+        else if not value
+            @_protocol = nil
+
+    getHref: =>
+        href = @_href
+        if not href
+            href = @_href = @format!
+        return href
+    setHref: (value) => @_href = value
+
+    @parse: (str, parseStringQuery, hostDenotesSlash, disableAutoEscapeChars) ->
+        if type(str) == "table" and str.__name == URL.__name
+            return str
+        ret = URL!
+        ret\parse(str, not not parseStringQuery, not not hostDenotesSlash, not not disableAutoEscapeChars)
+        return ret
+
+    @format: (obj) ->
+        if type(obj) == "string"
+            obj = URL.parse(obj)
+        if type(obj) != "table" or obj.__name != URL.__name
+            return URL.__base.format(obj)
+        return obj\format()
+
+    @resolve: (source, relative) -> URL.parse(source)\resolve(relative)
+
+    @resolveObject: (source, relative) ->
+        if not source
+            return relative
+        return URL.parse(source, false, true)\resolveObject(relative)
