@@ -681,7 +681,7 @@ export class URL
                 -- occationaly the auth can get stuck only in host
                 -- this especialy happens in cases like
                 -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
-                authInHost = (result.host and (find(result.host, "@", 1, true) or -1) > 0) and Split(Split(result.host)) or false
+                authInHost = (result.host and (find(result.host, "@", 1, true) or -1) > 0) and Split(result.host, "@") or false
                 if authInHost
                     result.auth = authInHost[1]
                     result.host = result.hostname = authInHost[2]
@@ -735,7 +735,7 @@ export class URL
             -- occationaly the auth can get stuck only in host
             -- this especialy happens in cases like
             -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
-            authInHost = result.host and (find(result.host, "@", 1, true) or -1) > 0 and Split(Split(result.host)) or false
+            authInHost = result.host and (find(result.host, "@", 1, true) or -1) > 0 and Split(result.host, "@") or false
             if authInHost
                 result.auth = authInHost[1]
                 result.host = result.hostname = authInHost[2]
