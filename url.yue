@@ -1038,6 +1038,7 @@ export class URL
             when "path" then @getPath!
             when "protocol" then @getProtocol!
             when "href" then @getHref!
+            else rawget(URL.__base, key)
 
     __newindex: (key, value) =>
         switch key
@@ -1046,6 +1047,7 @@ export class URL
             when "path" then @setPath(value)
             when "protocol" then @setProtocol(value)
             when "href" then @setHref(value)
+            else rawset(@, key, value)
 
     getPort: => if @_port >= 0 then return tostring @_port
     setPort: (value) =>
@@ -1086,7 +1088,7 @@ export class URL
 
     getHref: =>
         href = @_href
-        if not href
+        if not href or href == ""
             href = @_href = @format!
         return href
     setHref: (value) => @_href = value
