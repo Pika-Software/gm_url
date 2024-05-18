@@ -1223,5 +1223,3 @@ export class URL
             return URL.parse(source, false, true)\resolveObject(relative)
 
         return relative
-
-PrintTable URL.parse("file://test:80")
