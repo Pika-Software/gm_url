@@ -21,7 +21,7 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 --]]
-import istable, isnumber, isstring, tostring, tonumber, rawget, rawset from _G
+import istable, isnumber, isstring, tostring, tonumber, rawget, rawset, getmetatable from _G
 import byte, char, sub, gsub, match, find, lower, Split from string
 import concat, insert, remove from table
 
@@ -67,6 +67,10 @@ containsCharacter2 = (str, char1, char2) ->
             return true
 
     return false
+
+isSlash = (str, pos) ->
+    ch = byte(str, pos)
+    return ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
 
 -- Lookup table for decoding percent-encoded characters and encoding special characters
 -- Using HEX_TABLE will result in a double speedup compared to using functions
@@ -493,7 +497,7 @@ export class URL
 
         @_prependSlash = false
 
-    parse: (str, parseStringQuery, hostDenotesSlash, disableAutoEscapeChars) =>
+    parse: (str, parseStringQuery, disableAutoEscapeChars) =>
         unless isstring(str)
             error "Parameter 'url' must be a string, not " .. type(str)
 
@@ -508,10 +512,11 @@ export class URL
 
         -- If after protocol there is //, then we must parse the host
         hasFollowingSolidus = byte(str, startPos) == 0x2F and byte(str, startPos + 1) == 0x2F and byte(str, startPos + 2) != 0x2F -- '/'
+
         protocol = @_protocol
         isSpecial = protocol and @_specialSchemes[protocol]
         if (isSpecial and protocol != "file") or hasFollowingSolidus
-            startPos = @_parseHost(str, startPos, endPos, hostDenotesSlash)
+            startPos = @_parseHost(str, startPos, endPos)
 
             if not @hostname and @slashes and isSpecial
                 @hostname = @host = ""
@@ -555,11 +560,11 @@ export class URL
 
         search = @search or ""
         if search == ""
-            search = query != "" and "?" .. query or ""
+            search = query != "" and ("?" .. query) or ""
 
         protocol = @_protocol or ""
         if protocol != "" and byte(protocol, -1) != 0x3A -- ':'
-            protocol = protocol .. ":"
+            protocol ..= ":"
 
         hostname = @hostname or ""
         port = @_port or ""
@@ -580,45 +585,44 @@ export class URL
 
         slashes = @slashes or ((protocol == "" or @_specialSchemes[protocol]) and host != false)
 
-        local scheme
-        if protocol != ""
-            scheme = protocol .. (slashes and "//" or "/")
-        elseif slashes
-            scheme = "//"
-        else
-            scheme = ""
+        local scheme = protocol
+        if slashes
+            scheme ..= "//"
 
         pathname = @pathname or ""
-        if slashes and pathname != "" and byte(pathname, 1) != 0x2F -- '/'
-            pathname = "/" .. pathname
+        if pathname != ""
+            if slashes and byte(pathname, 1) != 0x2F -- '/'
+                pathname = "/" .. pathname
 
-        pathname = @_escapePathname( pathname )
+            pathname = @_escapePathname(pathname)
 
-        if search != "" and byte(search, 1) != 0x3F -- '?'
-            search = "?" .. search
+        if search != ""
+            if byte(search, 1) != 0x3F -- '?'
+                search = "?" .. search
 
-        search = @_escapeSearch( search )
+            search = @_escapeSearch(search)
 
         hash = @hash or ""
         if hash != "" and byte(hash, 1) != 0x23 -- '#'
             hash = "#" .. hash
 
-        return concat([scheme, host == false and "" or host, pathname, search, hash], "", 1, 5 )
+        host or= "" -- if host is false, then it should be an empty string
+    
+        return scheme .. host .. pathname .. search .. hash
 
     resolveObject: (relative) =>
         if isstring(relative)
             relative = URL.parse(relative, false, true)
+
+        -- if the relative url is empty, then there"s nothing left to do here.
+        if relative.href == ""
+            return URL! -- Just build an empty URL object
 
         result = @_clone!
 
         -- hash is always overridden, no matter what.
         -- even href="" will remove it.
         result.hash = relative.hash
-
-        -- if the relative url is empty, then there"s nothing left to do here.
-        if relative.href == ""
-            result.href = ""
-            return result
 
         -- hrefs like //foo/bar always cut to the protocol.
         if relative.slashes and not relative._protocol
@@ -647,7 +651,7 @@ export class URL
             result._protocol = relative._protocol
 
             if not relative.host and relative._protocol != "javascript"
-                relPath = Split(relative.pathname or "", "/")
+                relPath = relative.pathname and Split(relative.pathname, "/") or []
 
                 while #relPath != 0
                     host = remove(relPath, 1)
@@ -687,36 +691,36 @@ export class URL
 
         srcPath = result.pathname and Split(result.pathname, "/") or []
         relPath = relative.pathname and Split(relative.pathname, "/") or []
-        psychotic = result._protocol and not @_specialSchemes[result._protocol]
+        -- psychotic = result._protocol and not @_specialSchemes[result._protocol]
 
         -- if the url is a non-slashed url, then relative
         -- links like ../.. should be able
         -- to crawl up to the hostname, as well.  This is strange.
         -- result.protocol has already been set by now.
         -- Later on, put the first path part into the host field.
-        if psychotic
-            result.hostname = ""
-            result._port = -1
-            if result.host
-                if srcPath[1] == ""
-                    srcPath[1] = result.host
-                else
-                    insert(srcPath, 1, result.host)
+        -- if psychotic
+        --     result.hostname = ""
+        --     result._port = -1
+        --     if result.host
+        --         if srcPath[1] == ""
+        --             srcPath[1] = result.host
+        --         else
+        --             insert(srcPath, 1, result.host)
 
-            result.host = ""
-            if relative._protocol
-                relative.hostname = ""
-                relative._port = -1
+        --     result.host = ""
+        --     if relative._protocol
+        --         relative.hostname = ""
+        --         relative._port = -1
 
-                if relative.host
-                    if relPath[1] == ""
-                        relPath[1] = relative.host
-                    else
-                        insert(relPath, 1, relative.host)
+        --         if relative.host
+        --             if relPath[1] == ""
+        --                 relPath[1] = relative.host
+        --             else
+        --                 insert(relPath, 1, relative.host)
 
-                relative.host = ""
+        --         relative.host = ""
 
-            mustEndAbs = mustEndAbs and (relPath[1] == "" or srcPath[1] == "")
+        --     mustEndAbs = mustEndAbs and (relPath[1] == "" or srcPath[1] == "")
 
         if isRelAbs
             -- it's absolute.
@@ -743,21 +747,23 @@ export class URL
             -- just pull out the search.
             -- like href="?foo".
             -- Put this after the other two cases because it simplifies the booleans
-            if psychotic
-                result.hostname = result.host = remove(srcPath, 1)
-                -- occationaly the auth can get stuck only in host
-                -- this especialy happens in cases like
-                -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
-                authInHost = (result.host and (find(result.host, "@", 1, true) or -1) > 0) and Split(result.host, "@") or false
-                if authInHost
-                    result.auth = authInHost[1]
-                    result.host = result.hostname = authInHost[2]
+            -- if psychotic
+            --     result.hostname = result.host = remove(srcPath, 1)
+            --     -- occationaly the auth can get stuck only in host
+            --     -- this especialy happens in cases like
+            --     -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
+            --     authInHost = (result.host and (find(result.host, "@", 1, true) or -1) > 0) and FastSplit(result.host, 0x40 --[[ @ ]]) or false
+            --     if authInHost
+            --         result.auth = authInHost[1]
+            --         result.host = result.hostname = authInHost[2]
 
             result.search = relative.search
             result._href = ""
             return result
 
-        if #srcPath == 0
+        -- TODO: Make this faster
+        srcLength = #srcPath
+        if srcLength == 0
             -- no path at all.  easy.
             -- we"ve already handled the other stuff above.
             result.pathname = nil
@@ -767,13 +773,13 @@ export class URL
         -- if a url ENDs in . or .., then it must get a trailing slash.
         -- however, if it ends in anything else non-slashy,
         -- then it must NOT get a trailing slash.
-        last = srcPath[#srcPath]
+        last = srcPath[srcLength]
         hasTrailingSlash = (result.host or relative.host) or (last == "." or last == ".." ) or last == ""
 
         -- strip single dots, resolve double dots to parent dir
         -- if the path tries to go above the root, `up` ends up > 0
         up = 0
-        for i = #srcPath, 1, -1
+        for i = srcLength, 1, -1
             last = srcPath[i]
             if last == "."
                 remove(srcPath, i)
@@ -790,31 +796,33 @@ export class URL
                 insert(srcPath, 1, "..")
                 up -= 1
 
-        if mustEndAbs and srcPath[1] != "" and (not srcPath[0] or byte(srcPath[1], 1) != 0x2F --[['/']])
+        if mustEndAbs and srcPath[1] != "" and (not srcPath[1] or byte(srcPath[1], 1) != 0x2F --[['/']])
             insert(srcPath, 1, "")
 
-        if hasTrailingSlash and (byte( concat(srcPath, "/"), 1 ) != 0x2F --[['/']])
-            srcPath[] = ""
+        -- TODO: there ( in glua ) are no absolute paths and idk how fix this
+        -- if hasTrailingSlash and byte( concat( srcPath, "/" ), 1 ) != 0x2F --[['/']]
+        --     srcPath[] = ""
 
-        isAbsolute = srcPath[1] == "" or (srcPath[0] and byte(srcPath[1], 1) == 0x2F --[['/']])
+        -- isAbsolute = srcPath[1] == "" or (srcPath[1] and byte(srcPath[1], 1) == 0x2F --[['/']])
+        isAbsolute = true
 
         -- put the host back
-        if psychotic
-            result.hostname = result.host = isAbsolute and "" or #srcPath > 0 and remove(srcPath, 1) or ""
-            -- occationaly the auth can get stuck only in host
-            -- this especialy happens in cases like
-            -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
-            authInHost = result.host and (find(result.host, "@", 1, true) or -1) > 0 and Split(result.host, "@") or false
-            if authInHost
-                result.auth = authInHost[1]
-                result.host = result.hostname = authInHost[2]
+        -- if psychotic
+        --     result.hostname = result.host = isAbsolute and "" or #srcPath > 0 and remove(srcPath, 1) or ""
+        --     -- occationaly the auth can get stuck only in host
+        --     -- this especialy happens in cases like
+        --     -- url.resolveObject("mailto:local1@domain1", "local2@domain2")
+        --     authInHost = result.host and (find(result.host, "@", 1, true) or -1) > 0 and FastSplit(result.host, 0x40 --[[ @ ]]) or false
+        --     if authInHost
+        --         result.auth = authInHost[1]
+        --         result.host = result.hostname = authInHost[2]
 
         mustEndAbs = mustEndAbs or (result.host and #srcPath > 0)
 
         if not mustEndAbs and not isAbsolute
             insert(srcPath, 1, "")
 
-        result.pathname = srcPath != 0 and concat(srcPath, "/") or nil
+        result.pathname = #srcPath != 0 and concat(srcPath, "/") or nil
         result.auth = relative.auth or result.auth
         result.slashes = result.slashes or relative.slashes
         result._href = ""
@@ -881,7 +889,7 @@ export class URL
             @_port = port
         return i - startPos
 
-    _parseHost: (str, startPos, endPos, slashesDenoteHost) =>
+    _parseHost: (str, startPos, endPos) =>
         hostEndingCharacters = @_hostEndingCharacters
         first = byte(str, startPos)
         second = byte(str, startPos + 1)
@@ -892,12 +900,6 @@ export class URL
             if startPos == 0
                 -- The string is just "//"
                 if endPos < 2
-                    return startPos
-                -- If slashes do not denote host and there is no auth,
-                -- there is no host when the string starts with //
-                hasAuth = containsCharacter(str, 0x40 --[[ @ ]], 3, hostEndingCharacters)
-                unless slashesDenoteHost or hasAuth
-                    @slashes = nil
                     return startPos
 
             startPos += 2
@@ -1124,6 +1126,7 @@ export class URL
             when "query" then @getQuery!
             when "path" then @getPath!
             when "protocol" then @getProtocol!
+            when "scheme" then @getScheme!
             when "href" then @getHref!
             else rawget(URL.__base, key)
 
@@ -1133,6 +1136,7 @@ export class URL
             when "query" then @setQuery(value)
             when "path" then @setPath(value)
             when "protocol" then @setProtocol(value)
+            when "scheme" then @setProtocol(value)
             when "href" then @setHref(value)
             else rawset(@, key, value)
 
@@ -1181,11 +1185,15 @@ export class URL
     setProtocol: (value) =>
         if isstring(value)
             if byte(value, -1) == 0x3A -- ':'
-                value = sub(value, 1, -2)
+                @_protocol = sub(value, 1, -2)
             else
-                value = value
+                @_protocol = value
         elseif not value
             @_protocol = nil
+
+    -- scheme
+    getScheme: =>
+        return @_protocol
 
     -- href
     getHref: =>
@@ -1213,7 +1221,7 @@ export class URL
         if not istable(obj) or obj.__name != URL.__name
             return URL.__base.format(obj)
 
-        return obj\format()
+        return obj\format!
 
     @resolve: (source, relative) ->
         return URL.parse(source)\resolve(relative)
@@ -1223,3 +1231,14 @@ export class URL
             return URL.parse(source, false, true)\resolveObject(relative)
 
         return relative
+
+    @__base.setScheme = @__base.setProtocol
+    @__base.__tostring = @__base.format
+
+export IsQueryStringParser = ( any ) ->
+    metatable = getmetatable( any )
+    return metatable and metatable.__class == QueryStringParser
+
+export IsURL = ( any ) ->
+    metatable = getmetatable( any )
+    return metatable and metatable.__class == URL
