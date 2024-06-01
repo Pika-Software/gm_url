@@ -68,24 +68,7 @@ export encodeURI = (s) ->
     s = gsub(s, "%W", HEX_TABLE)
     return s
 
-autoEscape = ["<", ">", "\"", "`", " ", "\r", "\n",
-    "\t", "{", "}", "|", "\\", "^", "`", "'"]
-
-autoEscapeMap = []
-
-for c in *autoEscape
-    esc = encodeURI(c)
-    if esc == c
-        esc = "%" .. bit.tohex(byte(c), 2)\upper!
-
-    autoEscapeMap[byte(c)] = esc
-
-afterQueryAutoEscapeMap = []
-
-for k, v in pairs(autoEscapeMap)
-    afterQueryAutoEscapeMap[k] = v
-
-autoEscapeMap[0x5C --[['\']]] = "/"
+isAlpha = (ch) -> (ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]) or (ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']])
 
 -- https://github.com/petkaantonov/querystringparser
 export class QueryStringParser
@@ -404,3 +387,28 @@ export class QueryStringParser
 
         return dictonary
 
+class URL
+    _specialSchemes =
+        ftp: 21
+        file: true
+        http: 80
+        https: 443
+        ws: 80
+        wss: 443
+
+    new: =>
+        @scheme = nil
+        @username = nil
+        @password = nil
+        @hostname = nil
+        @pathname = nil
+        @search = nil
+        @hash = nil
+
+    parse: (str) =>
+        startPos = 1
+        endPos = #str
+
+        -- Trim leading and trailing whitespaces
+        while (byte(str, startPos) or 0) <= 0x20 --[[ space ]] do startPos += 1
+        while (byte(str, endPos) or 0) <= 0x20 --[[ space ]] do endPos -= 1
