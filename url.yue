@@ -38,6 +38,14 @@ PLUS = 0x2B -- +
 INT_START = 0x30 -- 0
 INT_END = 0x39 -- 10
 
+SPECIAL_SCHEMAS =
+    ftp: 21
+    file: true
+    http: 80
+    https: 443
+    ws: 80
+    wss: 443
+
 -- Lookup table for decoding percent-encoded characters and encoding special characters
 -- Using HEX_TABLE will result in a double speedup compared to using functions
 HEX_TABLE = []
@@ -68,7 +76,9 @@ export encodeURI = (s) ->
     s = gsub(s, "%W", HEX_TABLE)
     return s
 
-isAlpha = (ch) -> (ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]) or (ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']])
+isLower = (ch) -> ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']]
+isUpper = (ch) -> ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]
+isAlpha = (ch) -> isLower(ch) or isUpper(ch)
 
 -- https://github.com/petkaantonov/querystringparser
 export class QueryStringParser
@@ -388,14 +398,6 @@ export class QueryStringParser
         return dictonary
 
 class URL
-    _specialSchemes =
-        ftp: 21
-        file: true
-        http: 80
-        https: 443
-        ws: 80
-        wss: 443
-
     new: =>
         @scheme = nil
         @username = nil
@@ -405,10 +407,41 @@ class URL
         @search = nil
         @hash = nil
 
-    parse: (str) =>
+    parse: (str, base) =>
         startPos = 1
         endPos = #str
 
         -- Trim leading and trailing whitespaces
-        while (byte(str, startPos) or 0) <= 0x20 --[[ space ]] do startPos += 1
-        while (byte(str, endPos) or 0) <= 0x20 --[[ space ]] do endPos -= 1
+        while byte(str, startPos) <= 0x20 --[[ space ]] do startPos += 1
+        while byte(str, endPos) <= 0x20 --[[ space ]] do endPos -= 1
+
+        startPos = @_parseScheme(str, startPos, endPos)
+
+        scheme = @scheme
+        isSpecial = SPECIAL_SCHEMAS[scheme]
+
+
+    _parseScheme: (str, startPos, endPos) =>
+        unless isAlpha byte(str, startPos)
+            return startPos
+        
+        doLowerCase = false
+        scheme = nil
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x3A -- ':'
+                scheme = sub(str, startPos, i - 1)
+                if doLowerCase
+                    scheme = lower(scheme)
+                @scheme = scheme
+                return i + 1
+            elseif isUpper(ch)
+                doLowerCase = true
+            elseif not isLower(ch) and ch != 0x2B --[['+']] and ch != 0x2D --[['-']] and ch != 0x2E --[['.']]
+                -- scheme have an invalid character, so it's not a scheme
+                break
+    
+        return startPos
+        
+
+URL!\parse("   https+git:")
