@@ -38,6 +38,23 @@ PLUS = 0x2B -- +
 INT_START = 0x30 -- 0
 INT_END = 0x39 -- 10
 
+compileCharacterTable = (chars) ->
+    result = []
+    for v in *chars
+        if istable v
+            for i = byte(v[1]), byte(v[2])
+                result[i] = true
+        else
+            result[byte(v)] = true
+    return result
+
+-- Use result from `compileCharacterTable` in `containsCharacter` as chars
+containsCharacter = (str, chars, startPos = 1, endPos = #str) ->
+    for i = startPos, endPos
+        if chars[byte(str, i)]
+            return true
+    return false
+
 SPECIAL_SCHEMAS =
     ftp: 21
     file: true
@@ -45,6 +62,21 @@ SPECIAL_SCHEMAS =
     https: 443
     ws: 80
     wss: 443
+
+FORBIDDEN_HOST_CODE_POINTS = compileCharacterTable [
+    "\0", "\t", "\n", "\r"
+    " ", "#", "/", ":" 
+    "<", ">", "?", "@"
+    "[", "\\", "]", "^", "|"
+]
+
+FORBIDDEN_DOMAIN_CODE_POINTS = compileCharacterTable [ 
+    "\0", "\t", "\n", "\r"
+    " ", "#", "/", ":" 
+    "<", ">", "?", "@"
+    "[", "\\", "]", "^", "|"
+    ["\0", "\x1F"], "%", "\x7F"
+]
 
 -- Lookup table for decoding percent-encoded characters and encoding special characters
 -- Using HEX_TABLE will result in a double speedup compared to using functions
@@ -79,6 +111,7 @@ export encodeURI = (s) ->
 isLower = (ch) -> ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']]
 isUpper = (ch) -> ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]
 isAlpha = (ch) -> isLower(ch) or isUpper(ch)
+isDigit = (ch) -> ch >= 0x30 --[['0']] and ch <= 0x39 --[['9']]
 
 -- https://github.com/petkaantonov/querystringparser
 export class QueryStringParser
@@ -416,10 +449,7 @@ class URL
         while byte(str, endPos) <= 0x20 --[[ space ]] do endPos -= 1
 
         startPos = @_parseScheme(str, startPos, endPos)
-
-        scheme = @scheme
-        isSpecial = SPECIAL_SCHEMAS[scheme]
-
+        startPos = @_parseAuthority(str, startPos, endPos)
 
     _parseScheme: (str, startPos, endPos) =>
         unless isAlpha byte(str, startPos)
@@ -442,6 +472,112 @@ class URL
                 break
     
         return startPos
-        
+    
+    _parseAuthority: (str, startPos, endPos) =>
+        scheme = @scheme
+        if not scheme
+            -- no scheme start
+            return startPos
+    
+        isSpecial = SPECIAL_SCHEMAS[scheme]
+        -- TODO check for base
+        -- TODO special handling for file:
+        if isSpecial
+            -- special authority slashes
+            if byte(str, startPos) == 0x2F --[['/']] and byte(str, startPos + 1) == 0x2F --[['/']]
+                startPos += 2
 
-URL!\parse("   https+git:")
+            -- special authority ignore slashes
+            while startPos <= endPos
+                ch = byte(str, startPos)
+                if ch != 0x2F --[['/']] and ch != 0x5C --[['\']]
+                    break
+                startPos += 1
+        elseif byte(str, startPos) == 0x2F --[['/']]
+            -- path or authority state
+            if byte(str, startPos + 1) != 0x2F --[['/']]
+                -- path state
+                return startPos
+            -- authority state
+            startPos += 2
+        else
+            -- opaque path state
+            return startPos
+
+        -- authority state
+        atSignSeen = false
+        passwordTokenSeen = false
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x2F --[['/']] or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or (isSpecial and ch == 0x5C --[['\']])
+                endPos = i - 1
+                break
+            elseif ch == 0x40 -- '@'
+                atSignSeen = i
+            elseif ch == 0x3A --[[':']] and not passwordTokenSeen
+                passwordTokenSeen = i
+        
+        -- After @ there is no hostname
+        if atSignSeen == endPos
+            error "Invalid URL: Missing host"
+
+        if atSignSeen
+            if passwordTokenSeen
+                @username = encodeURI sub(str, startPos, passwordTokenSeen - 1)
+                @password = encodeURI sub(str, passwordTokenSeen + 1, atSignSeen - 1)
+            else
+                @username = encodeURI sub(str, startPos, atSignSeen - 1)            
+
+        @_parseHost(str, atSignSeen and atSignSeen + 1 or startPos, endPos, isSpecial)
+        return endPos + 1
+
+    _parsePort: (str, startPos, endPos, defaultPort) =>
+        port = tonumber sub(str, startPos, endPos)
+        if not port or (port > 2 ^ 16 - 1) or port < 0
+            error "Invalid URL: Invalid port"
+        
+        if port != defaultPort
+            @port = port
+
+    _parseHost: (str, startPos, endPos, isSpecial) =>
+        insideBrackets = false
+        for i = startPos, endPos
+            ch = byte(str, i)
+            if ch == 0x3A --[[':']] and not insideBrackets
+                if i == startPos
+                    error "Invalid URL: Missing host"
+            
+                @_parsePort(str, i + 1, endPos, isSpecial)
+
+                endPos = i - 1
+                break
+            elseif ch == 0x5B -- '['
+                insideBrackets = true
+            elseif ch == 0x5D -- ']'
+                insideBrackets = false
+
+        if isSpecial and startPos == endPos
+            error "Invalid URL: Missing host"
+
+        if byte(str, startPos) == 0x5B -- '['
+            if byte(str, endPos) != 0x5D -- ']'
+                error "Invalid URL: IPv6 unclosed"
+    
+            -- TODO parse ipv6
+            @hostname = sub(str, startPos + 1, endPos - 1)
+        elseif not isSpecial
+            if containsCharacter(str, FORBIDDEN_HOST_CODE_POINTS, startPos, endPos)
+                error "Invalid URL: Host invalid code point"
+
+            @hostname = encodeURI sub(str, startPos, endPos)
+        else
+            domain = decodeURI sub(str, startPos, endPos)
+            asciiDomain = encodeURI(domain) -- TODO punycode encode
+            
+            if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
+                error "Invalid URL: Domain invalid code point"
+            -- TODO ends in a number + ipv4 parsing
+
+            @hostname = domain
+
+URL!\parse("https://google.com/")
