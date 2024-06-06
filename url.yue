@@ -23,6 +23,7 @@
 --]]
 import istable, isnumber, isstring, tostring, tonumber, rawget, rawset, getmetatable from _G
 import byte, char, sub, gsub, lower from string
+import concat from table
 
 compileCharacterTable = (chars) ->
     result = []
@@ -189,7 +190,7 @@ local parseRelative, parseRelativeSlash, parseSpecialAuthorityIgnoreSlashes, par
 local parseHost, parsePort, parseFile, parseFileSlash, parseFileHost, parsePathStart, parsePath, parseOpaquePath
 local parseQuery, parseFragment
 
-parseScheme = (str, startPos, endPos, base) =>
+parseScheme = (str, startPos, endPos, base, stateOverride) =>
     -- scheme start state
     if isAlpha byte(str, startPos)
         -- scheme state
@@ -201,10 +202,21 @@ parseScheme = (str, startPos, endPos, base) =>
                 scheme = sub(str, startPos, i - 1)
                 if doLowerCase
                     scheme = lower(scheme)
+                
+                isSpecial = SPECIAL_SCHEMAS[scheme]
+                if stateOverride
+                    isUrlSpecial = @scheme and SPECIAL_SCHEMAS[@scheme]
+                    if isUrlSpecial and not isSpecial then return
+                    if not isUrlSpecial and isSpecial then return
+                    if @username or @password or @port and isSpecial == true then return
+                    if isUrlSpecial == true and not @hostname == "" then return
+
                 @scheme = scheme
 
-                isSpecial = SPECIAL_SCHEMAS[scheme]
-                if isSpecial == true -- scheme is file:
+                if stateOverride
+                    if @port == isSpecial
+                        @port = nil
+                elseif isSpecial == true -- scheme is file:
                     -- file state
                     parseFile(@, str, i + 1, endPos, base)
                 elseif isSpecial and base and base.scheme == scheme
@@ -226,9 +238,9 @@ parseScheme = (str, startPos, endPos, base) =>
                 -- scheme have an invalid character, so it's not a scheme
                 break
 
-    -- no scheme state
-    parseNoScheme(@, str, startPos, endPos, base)
-    
+    if not stateOverride
+        -- no scheme state
+        parseNoScheme(@, str, startPos, endPos, base)
 
 parseNoScheme = (str, startPos, endPos, base) =>
     startsWithFragment = byte(str, startPos) == 0x23 --[['#']]
@@ -305,6 +317,7 @@ parseSpecialAuthorityIgnoreSlashes = (str, startPos, endPos, base, isSpecial) =>
         ch = byte(str, i)
         if ch != 0x2F --[['/']] and ch != 0x5C --[['\']]
             parseAuthority(@, str, i, endPos, isSpecial)
+            break
 
 parseAuthority = (str, startPos, endPos, isSpecial) =>
     -- authority state
@@ -334,15 +347,20 @@ parseAuthority = (str, startPos, endPos, isSpecial) =>
     parseHost(@, str, atSignSeen and atSignSeen + 1 or startPos, endPos, isSpecial)
     parsePathStart(@, str, endPos + 1, endPos, isSpecial)
 
-parseHost = (str, startPos, endPos, isSpecial) =>
+parseHost = (str, startPos, endPos, isSpecial, stateOverride) =>
+    if stateOverride and isSpecial == true
+        return parseFileHost(@, str, startPos, endPos, stateOverride)
+
     insideBrackets = false
     for i = startPos, endPos
         ch = byte(str, i)
         if ch == 0x3A --[[':']] and not insideBrackets
             if i == startPos
                 error "Invalid URL: Missing host"
+            if stateOverride == "hostname"
+                return
         
-            parsePort(@, str, i + 1, endPos, isSpecial)
+            parsePort(@, str, i + 1, endPos, isSpecial, stateOverride)
 
             endPos = i - 1
             break
@@ -353,12 +371,16 @@ parseHost = (str, startPos, endPos, isSpecial) =>
 
     if isSpecial and startPos == endPos
         error "Invalid URL: Missing host"
+    elseif stateOverride and startPos == endPos and (@username or @password or @port)
+        return
 
     @hostname = parseHostString(str, startPos, endPos, isSpecial)
 
-parsePort = (str, startPos, endPos, defaultPort) =>
+parsePort = (str, startPos, endPos, defaultPort, stateOverride) =>
     port = tonumber sub(str, startPos, endPos)
     if not port or (port > 2 ^ 16 - 1) or port < 0
+        if stateOverride then 
+            return
         error "Invalid URL: Invalid port"
     
     if port != defaultPort
@@ -399,16 +421,19 @@ parseFileSlash = (str, startPos, endPos, base) =>
                 path[1] = base.path[1]
         parsePath(@, str, startPos, endPos, true, path)
 
-parseFileHost = (str, startPos, endPos) =>
+parseFileHost = (str, startPos, endPos, stateOverride) =>
     i = startPos
     while true
         ch = byte(str, i)
         if ch == 0x2F --[['/']] or ch == 0x5C --[['\']] or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or not ch -- EOF
             hostLen = i - startPos
-            if hostLen == 2 and isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1), false)
+            if not stateOverride and hostLen == 2 and isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1), false)
                 parsePath(@, str, startPos, endPos, true)
             elseif hostLen == 0
                 @hostname = ""
+                if stateOverride
+                    return
+                
                 parsePathStart(@, str, i, endPos, true)
             else
                 hostname = parseHostString(str, startPos, i - 1, false)
@@ -416,26 +441,31 @@ parseFileHost = (str, startPos, endPos) =>
                     hostname = ""
                 
                 @hostname = hostname
+                if stateOverride
+                    return
+                
                 parsePathStart(@, str, i, endPos, true)
             break
         i += 1
 
-parsePathStart = (str, startPos, endPos, isSpecial) =>
+parsePathStart = (str, startPos, endPos, isSpecial, stateOverride) =>
     ch = byte(str, startPos)
     if isSpecial
         if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
             startPos += 1
-        parsePath(@, str, startPos, endPos, isSpecial)
-    elseif ch == 0x3F --[['?']]
+        parsePath(@, str, startPos, endPos, isSpecial, nil, stateOverride)
+    elseif not stateOverride and ch == 0x3F --[['?']]
         parseQuery(@, str, startPos + 1, endPos)
-    elseif ch == 0x23 --[['#']]
+    elseif not stateOverride and ch == 0x23 --[['#']]
         parseFragment(@, str, startPos + 1, endPos)
     elseif ch -- not EOF
         if ch == 0x2F --[['/']]
             startPos += 1
-        parsePath(@, str, startPos, endPos, isSpecial)
+        parsePath(@, str, startPos, endPos, isSpecial, nil, stateOverride)
+    elseif stateOverride and not @hostname
+        @path[] = "" -- append empty string to path
 
-parsePath = (str, startPos, endPos, isSpecial, segments={}) =>
+parsePath = (str, startPos, endPos, isSpecial, segments={}, stateOverride) =>
     hasWindowsLetter = false
     segmentsCount = #segments
     segmentStart = startPos
@@ -443,7 +473,7 @@ parsePath = (str, startPos, endPos, isSpecial, segments={}) =>
     i = startPos
     while true
         ch = byte(str, i)
-        if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']]) or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or not ch -- EOF
+        if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']]) or (not stateOverride and (ch == 0x3F --[['?']] or ch == 0x23 --[['#']])) or not ch -- EOF
             segment = percentEncode(sub(str, segmentStart, i - 1), PATH_ENCODE_SET)
             segmentStart = i + 1
             if isDoubleDot(segment)
@@ -484,9 +514,9 @@ parseOpaquePath = (str, startPos, endPos) =>
 
     @path = percentEncode(sub(str, startPos, endPos), C0_ENCODE_SET)
 
-parseQuery = (str, startPos, endPos, isSpecial) =>
+parseQuery = (str, startPos, endPos, isSpecial, stateOverride) =>
     for i = startPos, endPos
-        if byte(str, i) == 0x23 --[['#']]
+        if not stateOverride and byte(str, i) == 0x23 --[['#']]
             parseFragment(@, str, i + 1, endPos)
             endPos = i - 1
             break
@@ -497,7 +527,7 @@ parseQuery = (str, startPos, endPos, isSpecial) =>
 parseFragment = (str, startPos, endPos) =>
     @fragment = percentEncode(sub(str, startPos, endPos), FRAGMENT_ENCODE_SET)
 
-parse = (str, base) =>
+export parse = (str, base) =>
     unless isstring str
         error "Invalid URL: URL must be a string"
     
@@ -520,32 +550,187 @@ parse = (str, base) =>
 
     parseScheme(@, str, startPos, endPos, base)
 
-    -- scheme = @scheme
-    -- isSpecial = scheme and SPECIAL_SCHEMAS[@scheme]
+export serialize = (excludeFragment) =>
+    scheme = @scheme
+    hostname = @hostname
+    path = @path
+    query = @query
+    fragment = @fragment
+    isOpaque = isstring(path)
 
-    -- if scheme
-    --     startPos = parseAuthority(@, str, startPos, endPos, isSpecial)
+    output = []
+    if scheme
+        output[] = scheme
+        output[] = ":"
+    if hostname
+        output[] = "//"
+        username = @username
+        password = @password
+        if username or password
+            output[] = username
+            if password and password != ""
+                output[] = ":"
+                output[] = password
+            output[] = "@"
+        output[] = hostname
+        if port := @port
+            output[] = ":"
+            output[] = tostring(port)
+    elseif path and not isOpaque and #path > 1 and path[1] == ""
+        output[] = "./"
 
-    -- ch = byte(str, startPos)
-    -- -- path start state
-    -- if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']])
-    --     -- path state
-    --     parsePath(@, str, startPos + 1, endPos, isSpecial)
-    -- elseif ch == 0x3F --[['?']]
-    --     -- query state
-    --     parseQuery(@, str, startPos + 1, endPos)
-    -- elseif ch == 0x23 --[['#']]
-    --     -- fragment state
-    --     parseFragment(@, str, startPos + 1, endPos)
-    -- elseif not isSpecial and ch -- any char
-    --     -- opaque path state
-    --     parseOpaquePath(@, str, startPos, endPos)
+    if path
+        output[] = isOpaque and path or "/" .. concat(path, "/")
+    
+    if query
+        output[] = "?"
+        output[] = query
+    
+    if fragment and excludeFragment != true
+        output[] = "#"
+        output[] = fragment
 
-class URL
+    return concat(output, "")
+
+getOrigin = =>
+    switch @scheme
+        when "ftp", "http", "https", "ws", "wss"
+            return @scheme, @hostname, @port
+        -- otherwise it is opaque
+
+serializeOrigin = =>
+    scheme, hostname, port = getOrigin()
+    if scheme
+        output = scheme .. "://" .. hostname
+        if port
+            output = output .. ":" .. port
+        return output
+
+serializeHost = (host) ->
+    return host -- TODO
+
+export class URL
     new: (str, base) =>
-        parse(@, str, base)
+        state = @state = {}
+        parse(state, str, base)
 
-    parse: parse
     @parse: (str, base) -> URL(str, base)
+    @canParse: (str, base) -> pcall(parse, {}, str, base)
 
-PrintTable URL("a", "file:/addons/gm_url/test/library/")
+    STATE_FIELDS = {"scheme": true, "username": true, "password": true, "hostname": true, "port": true, "path": true, "query": true, "fragment": true}
+
+    resetCache = () =>
+        rawset(@, "_href", nil)
+        rawset(@, "_origin", nil)
+        rawset(@, "_host", nil)
+        rawset(@, "_hostname", nil)
+        rawset(@, "_pathname", nil)
+
+    cacheValue = (key, value) =>
+        rawset(@, key, value)
+        return value
+
+    __index: (key) =>
+        state = rawget(@, "state")
+
+        -- State fields
+        if STATE_FIELDS[key]
+            switch key
+                when "hostname" then return rawget(@, "_hostname") or cacheValue(@, "_hostname", serializeHost(state.hostname))
+                else return state[key]
+
+        -- Special fields
+        return switch key
+            when "href" then return rawget(@, "_href") or cacheValue(@, "_href", serialize(state))
+            when "origin" then return rawget(@, "_origin") or cacheValue(@, "_origin", serializeOrigin(state))
+            when "protocol" then return state.scheme and state.scheme .. ":" or nil
+            when "host"
+                if cached := rawget(@, "_host") then return cached
+                if not state.hostname then return ""
+                return cacheValue(@, "_host", state.port and @hostname .. ":" .. state.port or @hostname)
+            when "pathname"
+                if cached := rawget(@, "_pathname") then return cached
+                if not istable(state.path) then return state.path
+                return cacheValue(@, "_pathname", "/" .. concat(state.path, "/"))
+            when "search"
+                if not state.query or state.query == "" then return ""
+                return "?" .. state.query
+            when "searchParams" then return -- TODO
+            when "hash"
+                if not state.fragment or state.fragment == "" then return ""
+                return "#" .. state.fragment
+            else return rawget(@, key)
+
+    __newindex: (key, value) =>
+        state = rawget(@, "state")
+
+        -- State fields
+        if STATE_FIELDS[key]
+            resetCache()
+            switch key
+                when "username"
+                    if not state.hostname or state.hostname == "" or state.scheme == "file"
+                        return
+                    state.username = value
+                when "password"
+                    if not state.hostname or state.hostname == "" or state.scheme == "file"
+                        return
+                    state.password = value
+                when "hostname"
+                    if isstring(state.path)
+                        return
+                    resetCache()
+                    parseHost(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], "hostname")
+                when "port"
+                    if not state.hostname or state.hostname == "" or state.scheme == "file"
+                        return
+
+                    resetCache()
+                    if not value or value == ""
+                        state.port = nil
+                        return
+                    else
+                        value = tostring(value)
+                        parsePort(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], true)
+                else state[key] = value
+            return
+
+        -- Special fields
+        switch key
+            when "href"
+                resetCache()
+                state = {}
+                parse(state, value)
+                rawset(@, "state", state)
+            when "origin" then return -- readonly field
+            when "protocol"
+                resetCache()
+                parseScheme(state, value, 1, #value, nil, true)
+            when "host"
+                if isstring(state.path)
+                    return
+                resetCache()
+                parseHost(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], "host")
+            when "pathname"
+                if isstring(state.path)
+                    return
+                resetCache()
+                path = {}
+                parsePathStart(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], true)
+            when "search"
+                resetCache()
+                leadingSymbol = byte(value, 1) == 0x3F --[['?']]
+                parseQuery(state, value, leadingSymbol and 2 or 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], true)
+            when "hash"
+                if not value or value == ""
+                    state.fragment = nil
+                    return
+                resetCache()
+                leadingSymbol = byte(value, 1) == 0x23 --[['#']]
+                parseFragment(state, value, leadingSymbol and 2 or 1, #value)
+            else rawset(@, key, value)
+
+
+url = URL("lua:/addons/gm_url/test/library/?query#test")
+print url.state.path
+-- url = URL "https://google.com"
