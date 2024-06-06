@@ -729,8 +729,3 @@ export class URL
                 leadingSymbol = byte(value, 1) == 0x23 --[['#']]
                 parseFragment(state, value, leadingSymbol and 2 or 1, #value)
             else rawset(@, key, value)
-
-
-url = URL("lua:/addons/gm_url/test/library/?query#test")
-print url.state.path
--- url = URL "https://google.com"
