@@ -22,21 +22,7 @@
     SOFTWARE.
 --]]
 import istable, isnumber, isstring, tostring, tonumber, rawget, rawset, getmetatable from _G
-import byte, char, sub, gsub, match, find, lower, Split from string
-import concat, insert, remove from table
-
-CERTAINLY_NOT_NESTED = false
-MIGHT_BE_NESTED = true
-
-COMMA = 0x2C -- ,
-EQUALS = 0x3D -- =
-PCT = 0x25 -- %
-LEFT = 0x5B -- [
-RIGHT = 0x5D -- ]
-AMP = 0x26 -- &
-PLUS = 0x2B -- +
-INT_START = 0x30 -- 0
-INT_END = 0x39 -- 10
+import byte, char, sub, gsub, lower from string
 
 compileCharacterTable = (chars) ->
     result = []
@@ -57,7 +43,7 @@ containsCharacter = (str, chars, startPos = 1, endPos = #str) ->
 
 SPECIAL_SCHEMAS =
     ftp: 21
-    file: true
+    file: true -- currently if value is true, then scheme will be treated as file: scheme in the parser
     http: 80
     https: 443
     ws: 80
@@ -78,383 +64,135 @@ FORBIDDEN_DOMAIN_CODE_POINTS = compileCharacterTable [
     ["\0", "\x1F"], "%", "\x7F"
 ]
 
--- Lookup table for decoding percent-encoded characters and encoding special characters
--- Using HEX_TABLE will result in a double speedup compared to using functions
-HEX_TABLE = []
+FILE_OTHERWISE_CODE_POINTS = compileCharacterTable [ "/", "\\", "?", "#" ]
+
+DECODE_LOOKUP_TABLE = []
 for i = 0x00, 0xFF
     hex = bit.tohex(i, 2)
-    HEX_TABLE[hex] = char(i)
-    HEX_TABLE[hex\upper!] = char(i)
-    HEX_TABLE[char(i)] = "%" .. hex\upper!
+    DECODE_LOOKUP_TABLE[hex] = char(i)
+    DECODE_LOOKUP_TABLE[hex\upper!] = char(i) 
 
--- Special characters
-HEX_TABLE["\r\n"] = "\n"
-HEX_TABLE[" "] = "+"
-HEX_TABLE["-"] = "-"
-HEX_TABLE["."] = "."
-HEX_TABLE["_"] = "_"
-HEX_TABLE["~"] = "~"
-HEX_TABLE["!"] = "!"
-HEX_TABLE["*"] = "*"
-HEX_TABLE["'"] = "'"
-HEX_TABLE["("] = "("
-HEX_TABLE[")"] = ")"
+URI_DECODE_SET = {...DECODE_LOOKUP_TABLE}
+for i in *[0x2D, 0x2E, 0x21, 0x7E, 0x2A, 0x27, 0x28, 0x29] -- decodeURI doesn't decode these characters: ; / ? : @ & = + $ , #
+    hex = bit.tohex(i, 2)
+    URI_DECODE_SET[hex] = nil
+    URI_DECODE_SET[hex\upper!] = nil
 
-export decodeURI = (s) ->
-    s = gsub(s, "%%(%x%x)", HEX_TABLE) |> gsub("+", " ")
+percentDecode = (s, decodeSet) ->
+    s = gsub(s, "%%(%x%x)", decodeSet)
     return s
 
-export encodeURI = (s) ->
-    s = gsub(s, "%W", HEX_TABLE)
+compilePercentEncodeSet = (encodeSet, ...) ->
+    -- Lookup table for decoding percent-encoded characters and encoding special characters
+    -- Using HEX_TABLE will result in a double speedup compared to using functions
+    encodeSet = {...encodeSet} -- copy given encodeSet, so we don't modify it
+    for ch in *{...}
+        if isstring ch
+            ch = byte(ch) -- if string then convert to byte
+
+        if isnumber ch -- just a single character
+            encodeSet[char(ch)] = "%" .. bit.tohex(ch, 2)\upper!
+        elseif istable ch -- range of characters
+            charStart = isstring(ch[1]) and byte(ch[1]) or ch[1]
+            charEnd = isstring(ch[2]) and byte(ch[2]) or ch[2]
+
+            for i = charStart, charEnd
+                encodeSet[char(i)] = "%" .. bit.tohex(i, 2)\upper!
+        
+    return encodeSet
+
+percentEncode = (s, encodeSet, spaceAsPlus) ->
+    old = nil
+    if spaceAsPlus == true
+        old = encodeSet[" "]
+        encodeSet[" "] = "+"
+    s = gsub(s, "%W", encodeSet)
+    if old
+        encodeSet[" "] = old
     return s
+
+C0_ENCODE_SET = compilePercentEncodeSet({}, [0x00, 0x1F], [0x7F, 0xFF])
+FRAGMENT_ENCODE_SET = compilePercentEncodeSet(C0_ENCODE_SET, " ", "\"", "<", ">", "`")
+QUERY_ENCODE_SET = compilePercentEncodeSet(C0_ENCODE_SET, " ", "\"", "#", "<", ">")
+SPECIAL_QUERY_ENCODE_SET = compilePercentEncodeSet(QUERY_ENCODE_SET, "'")
+PATH_ENCODE_SET = compilePercentEncodeSet(QUERY_ENCODE_SET, "?", "`", "{", "}")
+USERINFO_ENCODE_SET = compilePercentEncodeSet(PATH_ENCODE_SET, "/", ":", ";", "=", "@", [0x5B, 0x5E], "|")
+COMPONENT_ENCODE_SET = compilePercentEncodeSet(USERINFO_ENCODE_SET, [0x24, 0x26], "+", ",")
+URLENCODED_ENCODE_SET = compilePercentEncodeSet(COMPONENT_ENCODE_SET, "!", [0x27, 0x29], "~")
+URI_ENCODE_SET = compilePercentEncodeSet(C0_ENCODE_SET, 0x20, 0x22, 0x25, 0x3C, 0x3E, [0x42, 0x59], [0x5B, 0x5E], 0x60, [0x62, 0x79], [0x7B, 0x7D])
+
+export encodeURI = (s) -> percentEncode(s, URI_ENCODE_SET)
+export encodeURIComponent = (s) -> percentEncode(s, COMPONENT_ENCODE_SET, true)
+export decodeURIComponent = (s) -> percentDecode(s, DECODE_LOOKUP_TABLE)
+export decodeURI = (s) -> percentDecode(s, URI_DECODE_SET)
 
 isLower = (ch) -> ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']]
 isUpper = (ch) -> ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]
 isAlpha = (ch) -> isLower(ch) or isUpper(ch)
 isDigit = (ch) -> ch >= 0x30 --[['0']] and ch <= 0x39 --[['9']]
-
--- https://github.com/petkaantonov/querystringparser
-export class QueryStringParser
-    maxLength: 32768
-    maxDepth: 4
-    maxKeys: 256
-
-    parse: (str) =>
-        @containsSparse = false
-        @cacheKey = ""
-        @cacheVal = nil
-
-        if isstring(str)
-            if #str > @maxLength
-                error "str is too large (QueryStringParser.maxLength=" .. @maxLength .. ")"
-
-            return @parseString(str, false)
-        elseif istable(str)
-            error "not implemented"
-
-        return {}
-
-    stringify: (obj) =>
-        unless istable(obj)
-            error "obj must be a table"
-
-        keyPrefix = ""
-        cur = obj
-        key = nil
-        value = nil
-        isArray = false -- please do not pass array as first argument :)
-        stack = []
-        stackLen = 0
-        ret, length = {}, 0
-
-        -- spooky spooky while true loop :)
-        while true
-            if isArray
-                key += 1
-                value = cur[key]
-                unless value
-                    key = nil
-            else
-                key, value = next(cur, key)
-
-            if key != nil
-                serializedKey = encodeURI( isArray and tostring(key - 1) or tostring(key) )
-                if istable(value)
-                    stack[stackLen + 1] = keyPrefix
-                    stack[stackLen + 2] = cur
-                    stack[stackLen + 3] = key
-                    stack[stackLen + 4] = isArray
-                    stackLen += 4
-
-                    keyPrefix = keyPrefix == "" and serializedKey or keyPrefix .. "[" .. serializedKey .. "]"
-                    isArray = value[1] and true or false -- usually this is enough to determine if table is an array
-                    key = isArray and 0 or nil
-                    cur = value
-                else
-                    serializedKey = keyPrefix == "" and serializedKey or keyPrefix .. "[" .. serializedKey .. "]"
-                    length += 1
-                    ret[length] = serializedKey .. "=" .. encodeURI(value)
-            elseif stackLen != 0
-                keyPrefix = stack[stackLen - 3]
-                cur = stack[stackLen - 2]
-                key = stack[stackLen - 1]
-                isArray = stack[stackLen]
-                stackLen -= 4
-            else
-                break
-
-        return concat(ret, "&", 1, length)
-
-
-    decode: (str, shouldDecode, containsPlus) =>
-        unless shouldDecode
-            return str
-
-        if containsPlus
-            str = gsub(str, "%+", " ")
-
-        return decodeURI(str)
-
-    maybeArrayIndex: (str, arrayLength) =>
-        length = #str
-        -- Empty string I.E. direct brackets [] means index will be .length
-        if length == 0
-            return arrayLength
-
-        ch = byte(str, 1)
-
-        -- "0" is only valid index if it's the only character in the string
-        -- "00", "001", are not valid array indices
-        if ch == INT_START
-            return length > 1 and -1 or 1
-
-        if INT_START <= ch and ch <= INT_END
-            -- Single digit number 1-9
-            if length == 1
-                return ch - INT_START + 1
-            elseif match(str, "^%d+$")
-                return tonumber(str) + 1
-
-        return -1
-
-    getSlot: (dictonary, prevKey, curKey) =>
-        unless dictonary[prevKey]
-            dictonary[prevKey] = {}
-
-        return dictonary[prevKey]
-
-    placeNestedValue: (dictonary, key, value, i, prevKey, curKey) =>
-        slot = @getSlot(dictonary, prevKey, curKey)
-        index = @maybeArrayIndex(curKey, #slot)
-
-        length = #key
-        depth = 2
-        maxDepth = @maxDepth
-        start = -1
-
-        while (i <= length)
-            ch = byte(key, i)
-            if ch == LEFT
-                start = i + 1
-            elseif ch == RIGHT and start != -1
-                prevKey = curKey
-                curKey = start == i and "" or sub(key, start, i - 1)
-                start = -1
-                depth += 1
-
-                if depth > maxDepth
-                    error "too deep (QueryStringParser.maxDepth=" .. maxDepth .. ")"
-
-                slot = @getSlot(slot, prevKey, curKey)
-                index = @maybeArrayIndex(curKey, #slot)
-
-            i += 1
-
-        if index != -1
-            if value != ""
-                nextIndex = #slot + 1
-                if index == nextIndex
-                    slot[nextIndex] = value
-                else
-                    @containsSparse = true
-                    slot[index] = value
-        else
-            @insert(slot, curKey, value)
-
-    insert: (dictonary, key, value) =>
-        if prev := dictonary[key]
-            if istable(prev)
-                prev[] = value
-                return prev
-
-            new = [prev, value]
-            dictonary[key] = new
-            return new
-
-        dictonary[key] = value
-
-    push: (dictonary, key, value) =>
-        if prev := dictonary[key]
-            prev[] = value
-            return prev
-
-        new = {value}
-        dictonary[key] = new
-        return new
-
-    maybePlaceNestedValue: (dictonary, key, value) =>
-        len = #key
-        if byte(key, len) != RIGHT
-            @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
-            return
-
-        start = -1
-        i = 1
-        curKey = nil
-        prevKey = nil
-
-        while i <= len
-            ch = byte(key, i)
-            if ch == LEFT
-                start = i + 1
-                prevKey = sub(key, 1, i - 1)
-            elseif ch == RIGHT
-                if start == -1
-                    @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
-                    return
-
-                curKey = start == i and "" or sub(key, start, i - 1)
-                i += 1
-                break
-
-            i += 1
-
-        if curKey == nil
-            @placeValue(dictonary, key, value, CERTAINLY_NOT_NESTED)
-            return
-
-        if curKey == "" and value != "" and i == len
-            if key == @cacheKey
-                @cacheValue[] = value
-            else
-                @cacheKey = key
-                @cacheValue = @push(dictonary, prevKey, value)
-        else
-            @placeNestedValue(dictonary, key, value, i, prevKey, curKey)
-
-    placeValue: (dictonary, key, value, possiblyNested) =>
-        if possiblyNested == MIGHT_BE_NESTED
-            @maybePlaceNestedValue(dictonary, key, value)
-            return
-
-        if key == @cacheKey
-            @cacheValue[] = value
-            return
-
-        if cache := @insert(dictonary, key, value)
-            @cacheKey = key
-            @cacheValue = cache
-
-    compact: (obj) =>
-        unless istable(obj)
-            return obj
-
-        if obj[1] -- probably an array
-            ret, length = [], 0
-            for _, v in pairs obj
-                length += 1
-                ret[length] = v
-
-            return ret
-
-        for k, v in pairs obj
-            obj[k] = @compact(v)
-
-        return obj
-
-
-    parseString: (str, noDecode) =>
-        keys = 0
-        decodeKey = false
-        decodeValue = false
-        possiblyNested = CERTAINLY_NOT_NESTED
-        len = #str
-        i = 1
-        dictonary = {}
-        keyStart = 1
-        keyEnd = 1
-        valueStart = 1
-        valueEnd = 1
-        left = 0
-        containsPlus = false
-
-        while i <= len
-            ch = byte(str, i)
-
-            if ch == LEFT
-                left += 1
-            elseif left > 0 and ch == RIGHT
-                possiblyNested = MIGHT_BE_NESTED
-                left -= 1
-            elseif left == 0 and ch == EQUALS
-                keyEnd = i - 1
-                valueEnd = valueStart = i + 1
-                key = @decode(sub(str, keyStart, keyEnd), decodeKey, containsPlus)
-                decodeKey = false
-
-                for j = valueStart, len
-                    ch = byte(str, j)
-
-                    if (ch == PLUS or ch == PCT) and not noDecode
-                        if ch == PLUS then containsPlus = true
-                        decodeValue = true
-
-                    if ch == AMP or j == len
-                        valueEnd = j
-                        i = j
-
-                        if ch == AMP
-                            valueEnd -= 1
-
-                        value = sub(str, valueStart, valueEnd)
-                        value = @decode(value, decodeValue, containsPlus)
-
-                        -- Place value
-                        @placeValue(dictonary, key, value, possiblyNested)
-
-                        containsPlus = decodeValue = false
-                        possiblyNested = CERTAINLY_NOT_NESTED
-
-                        keyStart = j + 1
-                        keys += 1
-
-                        if (keys > @maxKeys)
-                            error "too many keys (QueryStringParser.maxKeys=" .. @maxKeys .. ")"
-
-                        break
-
-            elseif (ch == PLUS or ch == PCT) and not noDecode
-                if ch == PLUS then containsPlus = true
-                decodeKey = true
-
-            i += 1
-
-        if keyStart < len
-            key = @decode(sub(str, keyStart, len), decodeKey, containsPlus)
-            @placeValue(dictonary, key, "", possiblyNested)
-
-        if @containsSparse
-            -- original developer once said
-            -- This behavior is pretty stupid but what you gonna do
-            @compact(dictonary)
-
-        return dictonary
-
-class URL
-    new: =>
-        @scheme = nil
-        @username = nil
-        @password = nil
-        @hostname = nil
-        @pathname = nil
-        @search = nil
-        @hash = nil
-
-    parse: (str, base) =>
-        startPos = 1
-        endPos = #str
-
-        -- Trim leading and trailing whitespaces
-        while byte(str, startPos) <= 0x20 --[[ space ]] do startPos += 1
-        while byte(str, endPos) <= 0x20 --[[ space ]] do endPos -= 1
-
-        startPos = @_parseScheme(str, startPos, endPos)
-        startPos = @_parseAuthority(str, startPos, endPos)
-
-    _parseScheme: (str, startPos, endPos) =>
-        unless isAlpha byte(str, startPos)
-            return startPos
+isSingleDot = (str) ->
+    return switch #str
+        when 1 then str == "."
+        when 3 then lower(str) == "%2e"
+        else false
+isDoubleDot = (str) ->
+    return switch #str
+        when 2 then str == ".."
+        when 4
+            str = lower(str)
+            str == "%2e." or str == ".%2e"
+        when 6 then lower(str) == "%2e%2e"
+        else false
+isWindowsDriveLetterCodePoints = (ch1, ch2, normalized) -> isAlpha(ch1) and (ch2 == 0x3A --[[':']] or (normalized == false and ch2 == 0x7C --[['|']]))
+isWindowsDriveLetter = (str, normalized) -> return #str == 2 and isWindowsDriveLetterCodePoints(byte(str, 1), byte(str, 2), normalized)
+startsWithWindowsDriveLetter = (str, startPos, endPos) ->
+    len = endPos - startPos + 1
+    return len > 2 and 
+        isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1)) and
+        (len == 2 or FILE_OTHERWISE_CODE_POINTS[byte(str, startPos + 2)])
+
+-- Finds nearest non whitespace character from startPos to endPos
+-- And returns the position of that character
+trimInput = (str, startPos, endPos) ->
+    for i = startPos, endPos, (startPos < endPos and 1 or -1)
+        ch = byte(str, i)
+        if not ch --[[ EOF ]] or ch > 0x20 --[[ C0 control or space ]]
+            return i
+    return endPos - 1
+
+parseHostString = (str, startPos, endPos, isSpecial) ->
+    if byte(str, startPos) == 0x5B -- '['
+        if byte(str, endPos) != 0x5D -- ']'
+            error "Invalid URL: IPv6 unclosed"
+
+        -- TODO parse ipv6
+        return sub(str, startPos + 1, endPos - 1)
+    elseif not isSpecial
+        -- opaque host parsing
+        if containsCharacter(str, FORBIDDEN_HOST_CODE_POINTS, startPos, endPos)
+            error "Invalid URL: Host invalid code point"
+
+        return percentEncode(sub(str, startPos, endPos), C0_ENCODE_SET)
+    else
+        domain = percentDecode(sub(str, startPos, endPos), DECODE_LOOKUP_TABLE)
+        asciiDomain = percentEncode(domain, C0_ENCODE_SET) -- TODO punycode encode
         
+        if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
+            error "Invalid URL: Domain invalid code point"
+        -- TODO ends in a number + ipv4 parsing
+
+        return domain
+
+-- Predefine locals so we can make functions in the order I want (as if you were reading specs)
+local parseScheme, parseNoScheme, parseSpecialRelativeOrAuthority, parsePathOrAuthority
+local parseRelative, parseRelativeSlash, parseSpecialAuthorityIgnoreSlashes, parseAuthority
+local parseHost, parsePort, parseFile, parseFileSlash, parseFileHost, parsePathStart, parsePath, parseOpaquePath
+local parseQuery, parseFragment
+
+parseScheme = (str, startPos, endPos, base) =>
+    -- scheme start state
+    if isAlpha byte(str, startPos)
+        -- scheme state
         doLowerCase = false
         scheme = nil
         for i = startPos, endPos
@@ -464,120 +202,350 @@ class URL
                 if doLowerCase
                     scheme = lower(scheme)
                 @scheme = scheme
-                return i + 1
+
+                isSpecial = SPECIAL_SCHEMAS[scheme]
+                if isSpecial == true -- scheme is file:
+                    -- file state
+                    parseFile(@, str, i + 1, endPos, base)
+                elseif isSpecial and base and base.scheme == scheme
+                    -- special relative or authority state
+                    parseSpecialRelativeOrAuthority(@, str, i + 1, endPos, base, isSpecial)
+                elseif isSpecial
+                    -- special authority slashes state
+                    parseSpecialAuthorityIgnoreSlashes(@, str, i + 1, endPos, base, isSpecial) -- anyway state will ignore slashes
+                elseif byte(str, i + 1) == 0x2F --[['/']]
+                    -- path or authority state
+                    parsePathOrAuthority(@, str, i + 2, endPos, base)
+                else
+                    -- opaque path state
+                    parseOpaquePath(@, str, i + 1, endPos)
+                return
             elseif isUpper(ch)
                 doLowerCase = true
             elseif not isLower(ch) and ch != 0x2B --[['+']] and ch != 0x2D --[['-']] and ch != 0x2E --[['.']]
                 -- scheme have an invalid character, so it's not a scheme
                 break
-    
-        return startPos
-    
-    _parseAuthority: (str, startPos, endPos) =>
-        scheme = @scheme
-        if not scheme
-            -- no scheme start
-            return startPos
-    
-        isSpecial = SPECIAL_SCHEMAS[scheme]
-        -- TODO check for base
-        -- TODO special handling for file:
-        if isSpecial
-            -- special authority slashes
-            if byte(str, startPos) == 0x2F --[['/']] and byte(str, startPos + 1) == 0x2F --[['/']]
-                startPos += 2
 
-            -- special authority ignore slashes
-            while startPos <= endPos
-                ch = byte(str, startPos)
-                if ch != 0x2F --[['/']] and ch != 0x5C --[['\']]
-                    break
-                startPos += 1
-        elseif byte(str, startPos) == 0x2F --[['/']]
-            -- path or authority state
-            if byte(str, startPos + 1) != 0x2F --[['/']]
-                -- path state
-                return startPos
-            -- authority state
-            startPos += 2
-        else
-            -- opaque path state
-            return startPos
+    -- no scheme state
+    parseNoScheme(@, str, startPos, endPos, base)
+    
 
+parseNoScheme = (str, startPos, endPos, base) =>
+    startsWithFragment = byte(str, startPos) == 0x23 --[['#']]
+    baseHasOpaquePath = base and isstring(base.path)
+    if not base or (baseHasOpaquePath and not startsWithFragment)
+        error "Invalid URL: Missing scheme"
+
+    if baseHasOpaquePath and startsWithFragment
+        @scheme = base.scheme
+        @path = base.path
+        @query = base.query
+        parseFragment(@, str, startPos + 1, endPos)
+    elseif base.scheme != "file"
+        parseRelative(@, str, startPos, endPos, base)
+    else
+        @scheme = "file"
+        parseFile(@, str, startPos, endPos, base)
+
+parseSpecialRelativeOrAuthority = (str, startPos, endPos, base, isSpecial) =>
+    if byte(str, startPos) == 0x2F --[['/']] and byte(str, startPos + 1) == 0x2F --[['/']]
+        -- special authority slashes state
+        parseSpecialAuthorityIgnoreSlashes(@, str, startPos + 2, endPos, base, isSpecial)
+    else
+        -- relative state
+        @scheme = base.scheme
+        parseRelative(@, str, startPos, endPos, base, isSpecial)
+
+parsePathOrAuthority = (str, startPos, endPos, base) =>
+    if byte(str, startPos) == 0x2F --[['/']]
+        parseAuthority(@, str, startPos + 1, endPos)
+    else
+        parsePath(@, str, startPos, endPos)
+
+parseRelative = (str, startPos, endPos, base, isSpecial) =>
+    ch = byte(str, startPos)
+    if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']])
+        -- relative slash state
+        parseRelativeSlash(@, str, startPos + 1, endPos, base, isSpecial)
+    else
+        @username = base.username
+        @password = base.password
+        @hostname = base.hostname
+        @port = base.port
+        path = @path = {...base.path} -- clone path
+        if ch == 0x3F --[['?']]
+            parseQuery(@, str, startPos + 1, endPos)
+        elseif ch == 0x23 --[['#']]
+            @query = base.query
+            parseFragment(@, str, startPos + 1, endPos)
+        elseif ch -- not EOF
+            pathLen = #path
+            if pathLen != 1 or not isWindowsDriveLetter(path[1])
+                path[pathLen] = nil -- removing last path segment
+            parsePath(@, str, startPos, endPos, isSpecial, path)
+
+
+parseRelativeSlash = (str, startPos, endPos, base, isSpecial) =>
+    ch = byte(str, startPos)
+    if isSpecial and (ch == 0x2F --[['/']] or ch == 0x5C --[['\']])
+        -- special authority ignore slashes state
+        parseSpecialAuthorityIgnoreSlashes(@, str, startPos + 1, endPos, base, isSpecial)
+    elseif ch == 0x2F --[['/']]
         -- authority state
-        atSignSeen = false
-        passwordTokenSeen = false
-        for i = startPos, endPos
-            ch = byte(str, i)
-            if ch == 0x2F --[['/']] or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or (isSpecial and ch == 0x5C --[['\']])
-                endPos = i - 1
-                break
-            elseif ch == 0x40 -- '@'
-                atSignSeen = i
-            elseif ch == 0x3A --[[':']] and not passwordTokenSeen
-                passwordTokenSeen = i
-        
-        -- After @ there is no hostname
-        if atSignSeen == endPos
-            error "Invalid URL: Missing host"
+        parseAuthority(@, str, startPos + 1, endPos, isSpecial)
+    else
+        @username = base.username
+        @password = base.password
+        @hostname = base.hostname
+        @port = base.port
+        parsePath(@, str, startPos, endPos, isSpecial)
 
-        if atSignSeen
-            if passwordTokenSeen
-                @username = encodeURI sub(str, startPos, passwordTokenSeen - 1)
-                @password = encodeURI sub(str, passwordTokenSeen + 1, atSignSeen - 1)
-            else
-                @username = encodeURI sub(str, startPos, atSignSeen - 1)            
+parseSpecialAuthorityIgnoreSlashes = (str, startPos, endPos, base, isSpecial) =>
+    for i = startPos, endPos
+        ch = byte(str, i)
+        if ch != 0x2F --[['/']] and ch != 0x5C --[['\']]
+            parseAuthority(@, str, i, endPos, isSpecial)
 
-        @_parseHost(str, atSignSeen and atSignSeen + 1 or startPos, endPos, isSpecial)
-        return endPos + 1
-
-    _parsePort: (str, startPos, endPos, defaultPort) =>
-        port = tonumber sub(str, startPos, endPos)
-        if not port or (port > 2 ^ 16 - 1) or port < 0
-            error "Invalid URL: Invalid port"
-        
-        if port != defaultPort
-            @port = port
-
-    _parseHost: (str, startPos, endPos, isSpecial) =>
-        insideBrackets = false
-        for i = startPos, endPos
-            ch = byte(str, i)
-            if ch == 0x3A --[[':']] and not insideBrackets
-                if i == startPos
-                    error "Invalid URL: Missing host"
-            
-                @_parsePort(str, i + 1, endPos, isSpecial)
-
-                endPos = i - 1
-                break
-            elseif ch == 0x5B -- '['
-                insideBrackets = true
-            elseif ch == 0x5D -- ']'
-                insideBrackets = false
-
-        if isSpecial and startPos == endPos
-            error "Invalid URL: Missing host"
-
-        if byte(str, startPos) == 0x5B -- '['
-            if byte(str, endPos) != 0x5D -- ']'
-                error "Invalid URL: IPv6 unclosed"
+parseAuthority = (str, startPos, endPos, isSpecial) =>
+    -- authority state
+    atSignSeen = false
+    passwordTokenSeen = false
+    for i = startPos, endPos
+        ch = byte(str, i)
+        if ch == 0x2F --[['/']] or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or (isSpecial and ch == 0x5C --[['\']])
+            endPos = i - 1
+            break
+        elseif ch == 0x40 -- '@'
+            atSignSeen = i
+        elseif ch == 0x3A --[[':']] and not passwordTokenSeen
+            passwordTokenSeen = i
     
-            -- TODO parse ipv6
-            @hostname = sub(str, startPos + 1, endPos - 1)
-        elseif not isSpecial
-            if containsCharacter(str, FORBIDDEN_HOST_CODE_POINTS, startPos, endPos)
-                error "Invalid URL: Host invalid code point"
+    -- After @ there is no hostname
+    if atSignSeen == endPos
+        error "Invalid URL: Missing host"
 
-            @hostname = encodeURI sub(str, startPos, endPos)
+    if atSignSeen
+        if passwordTokenSeen
+            @username = percentEncode(sub(str, startPos, passwordTokenSeen - 1), USERINFO_ENCODE_SET)
+            @password = percentEncode(sub(str, passwordTokenSeen + 1, atSignSeen - 1), USERINFO_ENCODE_SET)
         else
-            domain = decodeURI sub(str, startPos, endPos)
-            asciiDomain = encodeURI(domain) -- TODO punycode encode
-            
-            if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
-                error "Invalid URL: Domain invalid code point"
-            -- TODO ends in a number + ipv4 parsing
+            @username = percentEncode(sub(str, startPos, atSignSeen - 1), USERINFO_ENCODE_SET)
 
-            @hostname = domain
+    parseHost(@, str, atSignSeen and atSignSeen + 1 or startPos, endPos, isSpecial)
+    parsePathStart(@, str, endPos + 1, endPos, isSpecial)
 
-URL!\parse("https://google.com/")
+parseHost = (str, startPos, endPos, isSpecial) =>
+    insideBrackets = false
+    for i = startPos, endPos
+        ch = byte(str, i)
+        if ch == 0x3A --[[':']] and not insideBrackets
+            if i == startPos
+                error "Invalid URL: Missing host"
+        
+            parsePort(@, str, i + 1, endPos, isSpecial)
+
+            endPos = i - 1
+            break
+        elseif ch == 0x5B -- '['
+            insideBrackets = true
+        elseif ch == 0x5D -- ']'
+            insideBrackets = false
+
+    if isSpecial and startPos == endPos
+        error "Invalid URL: Missing host"
+
+    @hostname = parseHostString(str, startPos, endPos, isSpecial)
+
+parsePort = (str, startPos, endPos, defaultPort) =>
+    port = tonumber sub(str, startPos, endPos)
+    if not port or (port > 2 ^ 16 - 1) or port < 0
+        error "Invalid URL: Invalid port"
+    
+    if port != defaultPort
+        @port = port
+
+parseFile = (str, startPos, endPos, base) =>
+    ch = byte(str, startPos)
+    if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
+        parseFileSlash(@, str, startPos + 1, endPos, base)
+    elseif base and base.scheme == "file"
+        @hostname = base.hostname
+        path = @path = {...base.path}
+        if ch == 0x3F --[['?']]
+            parseQuery(@, str, startPos + 1, endPos)
+        elseif ch == 0x23 --[['#']]
+            @query = base.query
+            parseFragment(@, str, startPos + 1, endPos)
+        elseif ch -- not EOF
+            pathLen = #path
+            if not startsWithWindowsDriveLetter(str, startPos, endPos)
+                if pathLen != 1 or not isWindowsDriveLetter(path[1])
+                    path[pathLen] = nil -- removing last path segment
+            else
+                path = nil
+            parsePath(@, str, startPos, endPos, true, path)
+    else
+        parsePath(@, str, startPos, endPos, true)
+
+parseFileSlash = (str, startPos, endPos, base) =>
+    ch = byte(str, startPos)
+    if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
+        parseFileHost(@, str, startPos + 1, endPos)
+    else
+        path = {}
+        if base and base.scheme == "file"
+            @hostname = base.hostname
+            if not startsWithWindowsDriveLetter(str, startPos, endPos) and isWindowsDriveLetter(base.path[1], false)
+                path[1] = base.path[1]
+        parsePath(@, str, startPos, endPos, true, path)
+
+parseFileHost = (str, startPos, endPos) =>
+    i = startPos
+    while true
+        ch = byte(str, i)
+        if ch == 0x2F --[['/']] or ch == 0x5C --[['\']] or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or not ch -- EOF
+            hostLen = i - startPos
+            if hostLen == 2 and isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1), false)
+                parsePath(@, str, startPos, endPos, true)
+            elseif hostLen == 0
+                @hostname = ""
+                parsePathStart(@, str, i, endPos, true)
+            else
+                hostname = parseHostString(str, startPos, i - 1, false)
+                if hostname == "localhost"
+                    hostname = ""
+                
+                @hostname = hostname
+                parsePathStart(@, str, i, endPos, true)
+            break
+        i += 1
+
+parsePathStart = (str, startPos, endPos, isSpecial) =>
+    ch = byte(str, startPos)
+    if isSpecial
+        if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
+            startPos += 1
+        parsePath(@, str, startPos, endPos, isSpecial)
+    elseif ch == 0x3F --[['?']]
+        parseQuery(@, str, startPos + 1, endPos)
+    elseif ch == 0x23 --[['#']]
+        parseFragment(@, str, startPos + 1, endPos)
+    elseif ch -- not EOF
+        if ch == 0x2F --[['/']]
+            startPos += 1
+        parsePath(@, str, startPos, endPos, isSpecial)
+
+parsePath = (str, startPos, endPos, isSpecial, segments={}) =>
+    hasWindowsLetter = false
+    segmentsCount = #segments
+    segmentStart = startPos
+
+    i = startPos
+    while true
+        ch = byte(str, i)
+        if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']]) or ch == 0x3F --[['?']] or ch == 0x23 --[['#']] or not ch -- EOF
+            segment = percentEncode(sub(str, segmentStart, i - 1), PATH_ENCODE_SET)
+            segmentStart = i + 1
+            if isDoubleDot(segment)
+                if segmentsCount != 1 or not hasWindowsLetter
+                    segments[segmentsCount] = nil
+                    segmentsCount -= 1
+            elseif not isSingleDot(segment)
+                if isSpecial == true --[[is file scheme]] and segmentsCount == 0 and isWindowsDriveLetter(segment, false)
+                    segment = gsub(segment, "|", ":")
+                    hasWindowsLetter = true
+                segmentsCount += 1
+                segments[segmentsCount] = segment
+
+            if ch == 0x3F --[['?']]
+                parseQuery(@, str, i + 1, endPos)
+                break
+            elseif ch == 0x23 --[['#']]
+                parseFragment(@, str, i + 1, endPos)
+                break
+            elseif not ch
+                break
+
+        i += 1
+
+    @path = segments
+
+parseOpaquePath = (str, startPos, endPos) =>
+    for i = startPos, endPos
+        ch = byte(str, i)
+        if ch == 0x3F --[['?']]
+            parseQuery(@, str, i + 1, endPos)
+            endPos = i - 1
+            break
+        elseif ch == 0x23 --[['#']]
+            parseFragment(@, str, i + 1, endPos)
+            endPos = i - 1
+            break
+
+    @path = percentEncode(sub(str, startPos, endPos), C0_ENCODE_SET)
+
+parseQuery = (str, startPos, endPos, isSpecial) =>
+    for i = startPos, endPos
+        if byte(str, i) == 0x23 --[['#']]
+            parseFragment(@, str, i + 1, endPos)
+            endPos = i - 1
+            break
+
+    encodeSet = isSpecial and SPECIAL_QUERY_ENCODE_SET or QUERY_ENCODE_SET
+    @query = percentEncode(sub(str, startPos, endPos), encodeSet)
+
+parseFragment = (str, startPos, endPos) =>
+    @fragment = percentEncode(sub(str, startPos, endPos), FRAGMENT_ENCODE_SET)
+
+parse = (str, base) =>
+    unless isstring str
+        error "Invalid URL: URL must be a string"
+    
+    if isstring base
+        -- yeah, we dont even need to full URL object for this
+        url = {}
+        parse(url, base)
+        base = url
+
+    str = gsub(str, "[\t\n\r]", "") -- remove all tab and newline characters
+    startPos = 1
+    endPos = #str
+
+    -- Trim leading and trailing whitespaces
+    startPos = trimInput(str, startPos, endPos)
+    endPos = trimInput(str, endPos, startPos)
+
+    if startPos > endPos
+        error "Invalid URL: Empty URL"
+
+    parseScheme(@, str, startPos, endPos, base)
+
+    -- scheme = @scheme
+    -- isSpecial = scheme and SPECIAL_SCHEMAS[@scheme]
+
+    -- if scheme
+    --     startPos = parseAuthority(@, str, startPos, endPos, isSpecial)
+
+    -- ch = byte(str, startPos)
+    -- -- path start state
+    -- if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']])
+    --     -- path state
+    --     parsePath(@, str, startPos + 1, endPos, isSpecial)
+    -- elseif ch == 0x3F --[['?']]
+    --     -- query state
+    --     parseQuery(@, str, startPos + 1, endPos)
+    -- elseif ch == 0x23 --[['#']]
+    --     -- fragment state
+    --     parseFragment(@, str, startPos + 1, endPos)
+    -- elseif not isSpecial and ch -- any char
+    --     -- opaque path state
+    --     parseOpaquePath(@, str, startPos, endPos)
+
+class URL
+    new: (str, base) =>
+        parse(@, str, base)
+
+    parse: parse
+    @parse: (str, base) -> URL(str, base)
+
+PrintTable URL("a", "file:/addons/gm_url/test/library/")
