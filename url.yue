@@ -21,7 +21,7 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 --]]
-import type, tostring, tonumber, rawget, rawset, getmetatable from _G
+import type, tostring, tonumber, rawget, rawset, getmetatable, pairs from _G
 import byte, char, sub, gsub, lower from string
 import concat from table
 
