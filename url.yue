@@ -21,9 +21,13 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 --]]
-import istable, isnumber, isstring, tostring, tonumber, rawget, rawset, getmetatable from _G
+import type, tostring, tonumber, rawget, rawset, getmetatable from _G
 import byte, char, sub, gsub, lower from string
 import concat from table
+
+isstring = isstring or (v) -> type(v) == "string"
+istable = istable or (v) -> type(v) == "table"
+isnumber = isnumber or (v) -> type(v) == "number"
 
 compileCharacterTable = (chars) ->
     result = []
