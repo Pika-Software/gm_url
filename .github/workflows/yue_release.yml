@@ -17,7 +17,6 @@ jobs:
 
       - name: Remove unused files and folders
         run: |
-          rm .gitignore
           rm -rf .github
 
       - name: Create VERSION file
