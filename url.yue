@@ -279,6 +279,7 @@ parsePathOrAuthority = (str, startPos, endPos, base) =>
         parsePath(@, str, startPos, endPos)
 
 parseRelative = (str, startPos, endPos, base, isSpecial) =>
+    @scheme = base.scheme
     ch = byte(str, startPos)
     if ch == 0x2F --[['/']] or (isSpecial and ch == 0x5C --[['\']])
         -- relative slash state
