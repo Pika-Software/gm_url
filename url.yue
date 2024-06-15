@@ -22,7 +22,8 @@
     SOFTWARE.
 --]]
 import type, tostring, tonumber, rawget, rawset, getmetatable, pairs from _G
-import byte, char, sub, gsub, lower from string
+import byte, char, sub, gsub, lower, format from string
+import floor from math
 import concat from table
 
 isstring = isstring or (v) -> type(v) == "string"
@@ -135,6 +136,7 @@ isLower = (ch) -> ch >= 0x61 --[['a']] and ch <= 0x7A --[['z']]
 isUpper = (ch) -> ch >= 0x41 --[['A']] and ch <= 0x5A --[['Z']]
 isAlpha = (ch) -> isLower(ch) or isUpper(ch)
 isDigit = (ch) -> ch >= 0x30 --[['0']] and ch <= 0x39 --[['9']]
+isHexDigit = (ch) -> isDigit(ch) or ch >= 0x41 --[['A']] and ch <= 0x46 --[['F']] or ch >= 0x61 --[['a']] and ch <= 0x66 --[['f']]
 isSingleDot = (str) ->
     return switch #str
         when 1 then str == "."
@@ -156,6 +158,14 @@ startsWithWindowsDriveLetter = (str, startPos, endPos) ->
         isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1)) and
         (len == 2 or FILE_OTHERWISE_CODE_POINTS[byte(str, startPos + 2)])
 
+-- Converts character to digit, 
+-- if given non valid character it will return invalid number
+charToDec = (ch) -> ch - 0x30
+hexToDec = (ch) ->
+    if ch >= 0x61 --[['a']] then return ch - 0x61 + 10
+    elseif ch >= 0x41 --[['A']] then return ch - 0x41 + 10
+    else return charToDec(ch)
+
 -- Finds nearest non whitespace character from startPos to endPos
 -- And returns the position of that character
 trimInput = (str, startPos, endPos) ->
@@ -165,13 +175,192 @@ trimInput = (str, startPos, endPos) ->
             return i
     return endPos - 1
 
+parseIPv4InIPv6 = (str, pointer, endPos, address, pieceIndex) ->
+    numbersSeen = 0
+    while pointer <= endPos
+        ipv4Piece = nil
+        ch = byte(str, pointer)
+        if numbersSeen > 0
+            unless ch == 0x2E --[['.']] and numbersSeen < 4
+                error "Invalid URL: IPv4 in IPv6 invalid code point"
+            pointer += 1
+            ch = pointer <= endPos and byte(str, pointer)
+
+        while ch and isDigit(ch)
+            num = charToDec(ch)
+            unless ipv4Piece
+                ipv4Piece = num
+            elseif ipv4Piece == 0
+                error "Invalid URL: IPv4 in IPv6 invalid code point"
+            else
+                ipv4Piece = ipv4Piece * 10 + num
+
+            if ipv4Piece > 255
+                error "Invalid URL: IPv4 in IPv6 out of range part"
+            
+            pointer += 1
+            ch = pointer <= endPos and byte(str, pointer)
+
+        unless ipv4Piece
+            error "Invalid URL: IPv4 in IPv6 invalid code point"
+
+        address[pieceIndex] = address[pieceIndex] * 0x100 + ipv4Piece
+        numbersSeen += 1
+        if numbersSeen == 2 or numbersSeen == 4
+            pieceIndex += 1
+
+    if numbersSeen != 4
+        error "Invalid URL: IPv4 in IPv6 too few parts"
+
+    return pieceIndex
+
+parseIPv6 = (str, startPos, endPos) ->
+    address = [0, 0, 0, 0, 0, 0, 0, 0] -- ipv6 address
+    pointer = startPos
+    pieceIndex = 1
+    compress = nil
+    dotSeen = false
+
+    if byte(str, startPos) == 0x3A -- ':'
+        if startPos == endPos --[[ EOF ]] or byte(str, startPos + 1) != 0x3A -- ':'
+            error "Invalid URL: IPv6 invalid compression"
+        pointer += 2
+        pieceIndex = compress = 2
+    
+    while pointer <= endPos
+        if pieceIndex == 9
+            error "Invalid URL: IPv6 too many pieces"
+
+        ch = byte(str, pointer)
+        if ch == 0x3A -- ':'
+            if compress
+                error "Invalid URL: IPv6 multiple compression"
+            pointer += 1
+            pieceIndex = compress = pieceIndex + 1
+            continue
+        
+        value = length = 0
+        while length < 4 and ch and isHexDigit(ch)
+            value = value * 0x10 + hexToDec(ch)
+            pointer += 1
+            length += 1
+            ch = pointer <= endPos and byte(str, pointer)
+
+        if ch == 0x2E -- '.'
+            if length == 0
+                error "Invalud URL: IPv4 in IPv6 invalid code point"
+            
+            pointer -= length
+            if pieceIndex > 7
+                error "Invalid URL: IPv4 in IPv6 too many pieces"
+            
+            pieceIndex = parseIPv4InIPv6(str, pointer, endPos, address, pieceIndex)
+            break
+        elseif ch == 0x3A -- ':'
+            pointer += 1
+            if pointer > endPos -- EOF
+                error "Invalid URL: IPv6 invalid code point"
+        elseif pointer <= endPos
+            error "Invalid URL: IPv6 invalid code point"
+
+        address[pieceIndex] = value
+        pieceIndex += 1
+
+    if compress
+        swaps = pieceIndex - compress
+        pieceIndex = 8
+        while pieceIndex != 1 and swaps > 0
+            value = address[pieceIndex]
+            address[pieceIndex] = address[compress + swaps - 1]
+            address[compress + swaps - 1] = value
+            swaps -= 1
+            pieceIndex -= 1
+    elseif pieceIndex != 9
+        error "Invalid URL: IPv6 too few pieces"
+
+    return address
+
+parseIPv4Number = (str) ->
+    if str == ""
+        return
+    radix = 10
+    ch1 = byte(str, 1)
+    ch2 = byte(str, 2)
+    if ch1 == 0x30 --[['0']] and (ch2 == 0x78 --[['x']] or ch2 == 0x58 --[['X']])
+        radix = 16
+        if #str == 2 then str = "0"
+    elseif ch1 == 0x30 --[['0']] and ch2
+        radix = 8
+    return tonumber(str, radix)
+
+endsInANumberChecker = (str, startPos, endPos) ->
+    -- find a starting point for number
+    lastPart = startPos
+    for i = endPos, startPos, -1
+        if byte(str, i) == 0x2E -- '.'
+            lastPart = i + 1
+            break
+    if lastPart > endPos
+        if lastPart == startPos -- string is empty
+            return false
+        -- string ends with '.', search for numbers before this dot
+        lastPart = startPos
+        endPos = endPos - 2
+        for i = endPos, startPos, -1
+            if byte(str, i) == 0x2E -- '.'
+                lastPart = i + 1
+                break
+
+    -- sanity check, do not invoke parser if we have ONLY digits
+    for i = lastPart, endPos
+        if not isDigit byte(str, i)
+            -- welp, let us try at least parse it, what if it is a hex number
+            return parseIPv4Number sub(str, lastPart, endPos)
+
+    return true -- every charactar was a digit, yay!
+
+parseIPv4 = (str, startPos, endPos) ->
+    numbers = []
+    pointer = startPos
+    while true
+        ch = pointer <= endPos and byte(str, pointer)
+        if not ch or ch == 0x2E -- '.'
+            num = parseIPv4Number sub(str, startPos, pointer - 1)
+            if not num
+                if pointer > endPos and #numbers > 0
+                    break
+                error "Invalid URL: IPv4 non numeric part"
+
+            startPos = pointer + 1
+            numbers[] = num
+            if not ch
+                break
+
+        pointer += 1
+
+    if #numbers > 4
+        error "Invalid URL: IPv4 too many parts"
+
+    for i = 1, #numbers - 1
+        if numbers[i] > 255
+            error "Invalid URL: IPv4 out of range part"
+
+    if numbers[#numbers] >= 256 ^ (5 - #numbers)
+        error "Invalid URL: IPv4 out of range part"
+    
+    ipv4 = numbers[#numbers]
+    counter = 0
+    for i = 1, #numbers - 1
+        ipv4 += numbers[i] * 256 ^ (3 - counter)
+        counter += 1
+    return ipv4
+
 parseHostString = (str, startPos, endPos, isSpecial) ->
     if byte(str, startPos) == 0x5B -- '['
         if byte(str, endPos) != 0x5D -- ']'
             error "Invalid URL: IPv6 unclosed"
 
-        -- TODO parse ipv6
-        return sub(str, startPos + 1, endPos - 1)
+        return parseIPv6(str, startPos + 1, endPos - 1)
     elseif not isSpecial
         -- opaque host parsing
         if containsCharacter(str, FORBIDDEN_HOST_CODE_POINTS, startPos, endPos)
@@ -184,7 +373,9 @@ parseHostString = (str, startPos, endPos, isSpecial) ->
 
         if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
             error "Invalid URL: Domain invalid code point"
-        -- TODO ends in a number + ipv4 parsing
+
+        if endsInANumberChecker(str, startPos, endPos)
+            return parseIPv4(str, startPos, endPos)
 
         return domain
 
@@ -555,6 +746,50 @@ export parse = (str, base) =>
 
     parseScheme(@, str, startPos, endPos, base)
 
+serializeIPv6 = (address) ->
+    output = []
+    len = compress = compressLen = zeroStart = 0
+    -- Find first longest sequence of zeros
+    for i = 1, 8
+        if address[i] == 0
+            if zeroStart == 0
+                zeroStart = i
+            elseif i - zeroStart > compressLen
+                compress = zeroStart
+                compressLen = i - zeroStart
+        else
+            zeroStart = 0
+
+    ignore0 = false
+    for i = 1, 8
+        if ignore0
+            if address[i] == 0
+                continue
+            ignore0 = false
+        if compress == i
+            len += 1
+            output[len] = i == 1 and "::" or ":"
+            ignore0 = true
+            continue
+        len += 1
+        output[len] = format("%x", address[i]) -- 🤔 I believe it is fastest way to represent a number as hex in lua
+        if i != 8
+            len += 1
+            output[len] = ":"
+
+    return table.concat(output, "", 1, len)
+
+serializeHost = (host) ->
+    if istable host
+        return "[" .. serializeIPv6(host) .. "]"
+    elseif isnumber host
+        address = []
+        for i = 1, 4
+            address[5 - i] = format("%u", host % 256)
+            host = floor(host / 256)
+        return concat(address, ".")
+    return host
+
 export serialize = (excludeFragment) =>
     scheme = @scheme
     hostname = @hostname
@@ -577,7 +812,7 @@ export serialize = (excludeFragment) =>
                 output[] = ":"
                 output[] = password
             output[] = "@"
-        output[] = hostname
+        output[] = serializeHost(hostname)
         if port := @port
             output[] = ":"
             output[] = tostring(port)
@@ -610,9 +845,6 @@ serializeOrigin = =>
         if port
             output = output .. ":" .. port
         return output
-
-serializeHost = (host) ->
-    return host -- TODO
 
 export class URL
     new: (str, base) =>
