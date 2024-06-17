@@ -1,9 +1,11 @@
 # gm_url
-Fast and *almost* [spec-compliant with whatwg-url](https://url.spec.whatwg.org/) URL parser library written in pure Lua! 
+Fast and *almost (97%)* [spec-compliant with whatwg-url](https://url.spec.whatwg.org/) URL parser library written in pure Lua! 
 
 *P.S. By saying "pure lua" I mean LuaJIT :P*
 <br>
 *P.S.S. I hate punycode*
+<br>
+*P.S.S.S. see a [part about spec complience below](#about-spec-compliancy)*
 
 ## Features
 - [x] [URL class](https://url.spec.whatwg.org/#url-class) API that is similiar to [Javascript's URL class](https://developer.mozilla.org/en-US/docs/Web/API/URL)
@@ -118,3 +120,16 @@ interface URLState
     query: string?
     fragment: string?
 ```
+
+## About spec-compliancy
+The only part of this library that is not spec-compliant is [IDNA processing](https://www.unicode.org/reports/tr46/tr46-31.html) because I am too lazy to spend time on this.
+
+
+Here is rate how much tests pass / fail
+![](screenshots/test-pass-fail.png)
+
+And here is what tests exactly failed. As you can see everything is related to IDNA/Punycode. 
+Since it is only 3% of all tests I don't even bother to fix it unless **REALLY** needed.
+![](screenshots/failed-tests.png)
+
+*`urltestdata.json` was taken from [web-platform-tests](https://github.com/web-platform-tests/wpt/tree/master/url/resources)*
