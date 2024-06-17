@@ -735,6 +735,8 @@ parsePort = (str, startPos, endPos, defaultPort, stateOverride) =>
         @port = port
 
 parseFile = (str, startPos, endPos, base) =>
+    @scheme = "file"
+    @hostname = ""
     ch = byte(str, startPos)
     if ch == 0x2F --[['/']] or ch == 0x5C --[['\']]
         parseFileSlash(@, str, startPos + 1, endPos, base)
