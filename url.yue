@@ -1164,4 +1164,3 @@ export IsURL = ( any ) ->
     metatable = getmetatable( any )
     return metatable and metatable.__class == URL
 
--- print URL("  \t", "http://example.org/foo/bar").href
