@@ -25,6 +25,7 @@ import type, tostring, tonumber, rawget, rawset, getmetatable, pairs from _G
 import byte, char, sub, gsub, lower, format from string
 import floor from math
 import concat from table
+import rshift, lshift, band, bor from bit
 
 isstring = isstring or (v) -> type(v) == "string"
 istable = istable or (v) -> type(v) == "table"
@@ -46,6 +47,8 @@ containsCharacter = (str, chars, startPos = 1, endPos = #str) ->
         if chars[byte(str, i)]
             return true
     return false
+
+PUNYCODE_PREFIX = [0x78, 0x6E, 0x2D, 0x2D] -- xn--
 
 SPECIAL_SCHEMAS =
     ftp: 21
@@ -174,6 +177,128 @@ trimInput = (str, startPos, endPos) ->
         if not ch --[[ EOF ]] or ch > 0x20 --[[ C0 control or space ]]
             return i
     return endPos - 1
+
+-- UTF-8 decoder from https://bjoern.hoehrmann.de/utf-8/decoder/dfa/
+UTF8_DECODE_LOOKUP = []
+do
+    UTF8_DECODE_LOOKUP_RULES = [
+        {0, 0x00, 0x7f}, {1, 0x80, 0x8f}, {9, 0x90, 0x9f}, {7, 0xa0, 0xbf},             -- 0x00 - 0xbf
+        {8, 0xc0, 0xc1}, {2, 0xc2, 0xdf}, {0xa, 0xe0}, {0x3, 0xe1, 0xef},               -- 0xc0 - 0xef
+        {0xb, 0xf0}, {0x6, 0xf1, 0xf3}, {0x5, 0xf4}, {0x8, 0xf5, 0xff},                 -- 0xf0 - 0xff
+        {0x0, 0x100}, {0x1, 0x101}, {0x2, 0x102}, {0x3, 0x103}, {0x5, 0x104}            -- 0x100 - 0x104
+        {0x8, 0x105}, {0x7, 0x106}, {0x1, 0x107, 0x10f}, {0x4, 0x10a}, {0x6, 0x10b},    -- 0x105 - 0x10f
+        {1, 0x110, 0x12f}, {0, 0x121}, {0, 0x127}, {0, 0x129},                          -- 0x110 - 0x12f
+        {1, 0x130, 0x14f}, {2, 0x131}, {2, 0x137}, {2, 0x139}, {2, 0x147},              -- 0x130 - 0x14f
+        {1, 0x150, 0x16f}, {2, 0x151}, {2, 0x159}, {3, 0x167}, {3, 0x169},              -- 0x150 - 0x16f
+        {1, 0x170, 0x18f}, {3, 0x171}, {3, 0x177}, {3, 0x179}, {3, 0x181}               -- 0x170 - 0x181
+    ] -- {val, start, end} / {val, pos}
+    for rule in *UTF8_DECODE_LOOKUP_RULES do
+        if rule[3]
+            for i = rule[2], rule[3] do UTF8_DECODE_LOOKUP[i] = rule[1]
+        else UTF8_DECODE_LOOKUP[rule[2]] = rule[1]
+
+utf8Decode = (str, startPos, endPos) ->
+    output = []
+    count = state = codep = 0
+    for i = startPos, endPos
+        b = byte(str, i)
+        t = UTF8_DECODE_LOOKUP[b]
+        codep = (state != 0) and 
+            bor( band(b, 0x3f), lshift(codep, 6) ) or
+            band( rshift(0xff, t), b )
+        state = UTF8_DECODE_LOOKUP[256 + state * 16 + t]
+        if state == 0
+            count += 1
+            output[count] = codep
+    if state != 0
+        error "Invalid URL: UTF-8 decoding error"
+    return output
+
+-- RFC 3492 Punycode encode
+punycodeEncode = (str, startPos, endPos) ->
+    const base = 36
+    const tMin = 1
+    const tMax = 26
+    const skew = 38
+    const damp = 700
+    const initialBias = 72
+    const initialN = 0x80
+    const delimiter = 0x2D --[['-']]
+
+    -- Initialize the state
+    n = initialN
+    input = utf8Decode(str, startPos, endPos)
+    inputLen = #input
+    output = []
+    delta = out = 0
+    bias = initialBias
+
+    -- Handle the basic code points
+    for ch in *input
+        if ch < 0x80
+            out += 1
+            output[out] = char(ch)
+
+    -- h is the number of code points that have been handled, b is the number of basic code points
+    -- that have been handled, and out is the number of characters that have been output.
+    h = b = out
+
+    if b > 0
+        out += 1
+        output[out] = char(delimiter)
+    
+    -- Main encoding loop
+    while h < inputLen
+        -- All non-basic code points < n have been handled already. Find the next larger one
+        m = 0x7FFFFFFF
+        for ch in *input
+            if ch >= n and ch < m then m = ch
+        
+        -- Increase delta enough to advance the decoder's <n,i> state to <m,0>, but guard against overflow
+        if m - n > (0x7FFFFFFF - delta) / (h + 1)
+            error "Invalid URL: Punycode overflow"
+
+        delta += (m - n) * (h + 1)
+        n = m
+
+        for ch in *input
+            -- Punycode does not need to check whether input[j] is basic:
+            if ch < n
+                delta += 1 -- Move this down incase of wrong answer
+                if delta + 1 > 0x7FFFFFFF
+                    error "Invalid URL: Punycode overflow"
+            if ch == n
+                -- Represent delta as a generalized variable-length integer
+                q = delta
+                k = base
+                while true
+                    t = k <= bias and tMin or
+                        k >= bias + tMax and tMax or k - bias
+                    if q < t then break
+                    d = t + (q - t) % (base - t)
+                    out += 1
+                    output[out] = char(d + 22 + (d < 26 and 75 or 0))
+                    q = floor((q - t) / (base - t))
+                    k += base
+
+                out += 1
+                output[out] = char(q + 22 + (q < 26 and 75 or 0))
+
+                k = 0
+                delta = h == b and floor(delta / damp) or rshift(delta, 1)
+
+                delta += floor(delta / (h + 1))
+                while delta > ((base - tMin) * tMax) / 2
+                    delta = floor(delta / (base - tMin))
+                    k += base
+                bias = floor(k + (base - tMin + 1) * delta / (delta + skew))
+                delta = 0
+                h += 1
+        
+        delta += 1
+        n += 1
+    
+    return concat(output, "", 1, out)
 
 parseIPv4InIPv6 = (str, pointer, endPos, address, pieceIndex) ->
     numbersSeen = 0
@@ -355,6 +480,33 @@ parseIPv4 = (str, startPos, endPos) ->
         counter += 1
     return ipv4
 
+domainToASCII = (domain) ->
+    containsNonASCII = false
+    punycodePrefix = 0
+    partStart = pointer = 1
+    parts = []
+    while true
+        ch = byte(domain, pointer)
+        if not ch or ch == 0x2E -- '.'
+            if punycodePrefix == 4
+                -- decode an find errors
+                if containsNonASCII then error "Invalid URL: Domain invalid code point"
+
+            parts[] = containsNonASCII and "xn--" .. punycodeEncode(domain, partStart, pointer - 1) or sub(domain, partStart, pointer - 1)
+            partStart = pointer + 1
+            containsNonASCII = false
+            punycodePrefix = 0
+            if not ch
+                break
+        elseif ch > 0x7F
+            containsNonASCII = true
+        elseif PUNYCODE_PREFIX[pointer - partStart + 1] == ch
+            punycodePrefix += 1
+    
+        pointer += 1
+
+    return concat(parts, ".")
+                
 parseHostString = (str, startPos, endPos, isSpecial) ->
     if byte(str, startPos) == 0x5B -- '['
         if byte(str, endPos) != 0x5D -- ']'
@@ -369,7 +521,7 @@ parseHostString = (str, startPos, endPos, isSpecial) ->
         return percentEncode(sub(str, startPos, endPos), C0_ENCODE_SET)
     else
         domain = percentDecode(sub(str, startPos, endPos), DECODE_LOOKUP_TABLE)
-        asciiDomain = percentEncode(domain, C0_ENCODE_SET) -- TODO punycode encode
+        asciiDomain = domainToASCII(domain)
 
         if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
             error "Invalid URL: Domain invalid code point"
@@ -377,7 +529,7 @@ parseHostString = (str, startPos, endPos, isSpecial) ->
         if endsInANumberChecker(str, startPos, endPos)
             return parseIPv4(str, startPos, endPos)
 
-        return domain
+        return asciiDomain
 
 -- Predefine locals so we can make functions in the order I want (as if you were reading specs)
 local parseScheme, parseNoScheme, parseSpecialRelativeOrAuthority, parsePathOrAuthority
