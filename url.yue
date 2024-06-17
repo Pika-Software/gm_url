@@ -420,29 +420,23 @@ parseIPv4Number = (str) ->
 
 endsInANumberChecker = (str, startPos, endPos) ->
     -- find a starting point for number
-    lastPart = startPos
-    for i = endPos, startPos, -1
-        if byte(str, i) == 0x2E -- '.'
-            lastPart = i + 1
-            break
-    if lastPart > endPos
-        if lastPart == startPos -- string is empty
-            return false
-        -- string ends with '.', search for numbers before this dot
-        lastPart = startPos
-        endPos = endPos - 2
-        for i = endPos, startPos, -1
-            if byte(str, i) == 0x2E -- '.'
-                lastPart = i + 1
+    numStart = startPos
+    numEnd = endPos
+    for i = numEnd, numStart, -1
+        if byte(str, i) == 0x2E --[['.']]
+            if i == endPos -- if dot is at the end, then skip it
+                numEnd = i - 1
+            else -- dot was found, so after it must be a number
+                numStart = i + 1
                 break
 
     -- sanity check, do not invoke parser if we have ONLY digits
-    for i = lastPart, endPos
+    for i = numStart, numEnd
         if not isDigit byte(str, i)
             -- welp, let us try at least parse it, what if it is a hex number
-            return parseIPv4Number sub(str, lastPart, endPos)
+            return parseIPv4Number sub(str, numStart, numEnd)
 
-    return true -- every charactar was a digit, yay!
+    return numStart <= numEnd -- every charactar was a digit, yay!
 
 parseIPv4 = (str, startPos, endPos) ->
     numbers = []
@@ -526,8 +520,8 @@ parseHostString = (str, startPos, endPos, isSpecial) ->
         if containsCharacter(asciiDomain, FORBIDDEN_DOMAIN_CODE_POINTS)
             error "Invalid URL: Domain invalid code point"
 
-        if endsInANumberChecker(str, startPos, endPos)
-            return parseIPv4(str, startPos, endPos)
+        if endsInANumberChecker(asciiDomain, 1, #asciiDomain)
+            return parseIPv4(asciiDomain, 1, #asciiDomain)
 
         return asciiDomain
 
@@ -717,7 +711,7 @@ parseHost = (str, startPos, endPos, isSpecial, stateOverride) =>
         elseif ch == 0x5D -- ']'
             insideBrackets = false
 
-    if isSpecial and startPos == endPos
+    if isSpecial and startPos > endPos
         error "Invalid URL: Missing host"
     elseif stateOverride and startPos == endPos and (@username or @password or @port)
         return
