@@ -27,6 +27,13 @@ import floor from math
 import concat from table
 import rshift, lshift, band, bor from bit
 
+-- a quirky way to check if number have metatable
+-- if it has, then we can use getmetatable and have even faster isnumber function
+isnumber = nil
+if numberMeta := getmetatable(0)
+    isnumber = (v) -> getmetatable(v) == numberMeta
+
+-- Garry's Mod have is<type> functions, prefer them because they are faster than type
 isstring = isstring or (v) -> type(v) == "string"
 istable = istable or (v) -> type(v) == "table"
 isnumber = isnumber or (v) -> type(v) == "number"
@@ -959,6 +966,7 @@ serializeIPv6 = (address) ->
             continue
         len += 1
         output[len] = format("%x", address[i]) -- 🤔 I believe it is fastest way to represent a number as hex in lua
+        -- why format? because it returns hex without zeros (aka smallest hex value)
         if i != 8
             len += 1
             output[len] = ":"
