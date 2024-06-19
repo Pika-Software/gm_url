@@ -1097,7 +1097,6 @@ export class URL
             when "hash"
                 if not state.fragment or state.fragment == "" then return ""
                 return "#" .. state.fragment
-            else return rawget(@, key)
 
     __newindex: (key, value) =>
         state = rawget(@, "state")
