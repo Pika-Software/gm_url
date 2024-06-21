@@ -23,13 +23,17 @@
 --]]
 import type, tostring, tonumber, rawget, rawset, getmetatable, pairs from _G
 import byte, char, sub, gsub, lower, format from string
-import floor from math
+import rshift, lshift, band, bor from (bit or bit32)
 import concat from table
-import rshift, lshift, band, bor from bit
+import floor from math
 
 -- a quirky way to check if number have metatable
 -- if it has, then we can use getmetatable and have even faster isnumber function
-isnumber = nil
+local isstring
+if stringMeta := getmetatable("")
+    isstring = (v) -> getmetatable(v) == stringMeta
+
+local isnumber
 if numberMeta := getmetatable(0)
     isnumber = (v) -> getmetatable(v) == numberMeta
 
@@ -168,7 +172,7 @@ startsWithWindowsDriveLetter = (str, startPos, endPos) ->
         isWindowsDriveLetterCodePoints(byte(str, startPos), byte(str, startPos + 1), false) and
         (len == 2 or FILE_OTHERWISE_CODE_POINTS[byte(str, startPos + 2)])
 
--- Converts character to digit, 
+-- Converts character to digit,
 -- if given non valid character it will return invalid number
 charToDec = (ch) -> ch - 0x30
 hexToDec = (ch) ->
@@ -211,7 +215,7 @@ utf8Decode = (str, startPos, endPos) ->
     for i = startPos, endPos
         b = byte(str, i)
         t = UTF8_DECODE_LOOKUP[b]
-        codep = (state != 0) and 
+        codep = (state != 0) and
             bor( band(b, 0x3f), lshift(codep, 6) ) or
             band( rshift(0xff, t), b )
         state = UTF8_DECODE_LOOKUP[256 + state * 16 + t]
@@ -254,14 +258,14 @@ punycodeEncode = (str, startPos, endPos) ->
     if b > 0
         out += 1
         output[out] = char(delimiter)
-    
+
     -- Main encoding loop
     while h < inputLen
         -- All non-basic code points < n have been handled already. Find the next larger one
         m = 0x7FFFFFFF
         for ch in *input
             if ch >= n and ch < m then m = ch
-        
+
         -- Increase delta enough to advance the decoder's <n,i> state to <m,0>, but guard against overflow
         if m - n > (0x7FFFFFFF - delta) / (h + 1)
             error "Invalid URL: Punycode overflow"
@@ -302,10 +306,10 @@ punycodeEncode = (str, startPos, endPos) ->
                 bias = floor(k + (base - tMin + 1) * delta / (delta + skew))
                 delta = 0
                 h += 1
-        
+
         delta += 1
         n += 1
-    
+
     return concat(output, "", 1, out)
 
 parseIPv4InIPv6 = (str, pointer, endPos, address, pieceIndex) ->
@@ -330,7 +334,7 @@ parseIPv4InIPv6 = (str, pointer, endPos, address, pieceIndex) ->
 
             if ipv4Piece > 255
                 error "Invalid URL: IPv4 in IPv6 out of range part"
-            
+
             pointer += 1
             ch = pointer <= endPos and byte(str, pointer)
 
@@ -359,7 +363,7 @@ parseIPv6 = (str, startPos, endPos) ->
             error "Invalid URL: IPv6 invalid compression"
         pointer += 2
         pieceIndex = compress = 2
-    
+
     while pointer <= endPos
         if pieceIndex == 9
             error "Invalid URL: IPv6 too many pieces"
@@ -371,7 +375,7 @@ parseIPv6 = (str, startPos, endPos) ->
             pointer += 1
             pieceIndex = compress = pieceIndex + 1
             continue
-        
+
         value = length = 0
         while length < 4 and ch and isHexDigit(ch)
             value = value * 0x10 + hexToDec(ch)
@@ -382,11 +386,11 @@ parseIPv6 = (str, startPos, endPos) ->
         if ch == 0x2E -- '.'
             if length == 0
                 error "Invalud URL: IPv4 in IPv6 invalid code point"
-            
+
             pointer -= length
             if pieceIndex > 7
                 error "Invalid URL: IPv4 in IPv6 too many pieces"
-            
+
             pieceIndex = parseIPv4InIPv6(str, pointer, endPos, address, pieceIndex)
             break
         elseif ch == 0x3A -- ':'
@@ -474,7 +478,7 @@ parseIPv4 = (str, startPos, endPos) ->
 
     if numbers[#numbers] >= 256 ^ (5 - #numbers)
         error "Invalid URL: IPv4 out of range part"
-    
+
     ipv4 = numbers[#numbers]
     counter = 0
     for i = 1, #numbers - 1
@@ -495,7 +499,7 @@ domainToASCII = (domain) ->
             -- Remove special symbols that are ignored
             -- I probably really should implement some proper punycode
             domain = gsub(domain, "\xC2\xAD", "") -- remove soft hyphen
-            domain = gsub(domain, "\xE3\x80\x82", ".") -- Ideographic full stop 
+            domain = gsub(domain, "\xE3\x80\x82", ".") -- Ideographic full stop
             -- remove space characters
             domain = gsub(domain, "\xE2\x80\x8B", "")
             domain = gsub(domain, "\xE2\x81\xA0", "")
@@ -517,7 +521,7 @@ domainToASCII = (domain) ->
             domainPart = containsNonASCII and "xn--" .. punycodeEncode(domain, partStart, pointer - 1) or sub(domain, partStart, pointer - 1)
             -- btw, punycode decode lowercases the domain, so we need to lowercase it
             -- in ideal sutiation I should have written punycodeDecode, but I am not in the mood to write it
-            if doLowerCase 
+            if doLowerCase
                 domainPart = lower(domainPart)
 
             parts[] = domainPart
@@ -532,11 +536,11 @@ domainToASCII = (domain) ->
             punycodePrefix += 1
         elseif isUpper(ch)
             doLowerCase = true
-    
+
         pointer += 1
 
     return concat(parts, ".")
-                
+
 parseHostString = (str, startPos, endPos, isSpecial) ->
     if byte(str, startPos) == 0x5B -- '['
         if byte(str, endPos) != 0x5D -- ']'
@@ -971,7 +975,7 @@ serializeIPv6 = (address) ->
             len += 1
             output[len] = ":"
 
-    return table.concat(output, "", 1, len)
+    return concat(output, "", 1, len)
 
 serializeHost = (host) ->
     if istable host
