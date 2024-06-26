@@ -9,6 +9,7 @@ Fast and *almost (97%)* [spec-compliant with whatwg-url](https://url.spec.whatwg
 
 ## Features
 - [x] [URL class](https://url.spec.whatwg.org/#url-class) API that is similiar to [Javascript's URL class](https://developer.mozilla.org/en-US/docs/Web/API/URL)
+- [x] Fully featured [URLSearchParams class](https://url.spec.whatwg.org/#interface-urlsearchparams)
 - [x] Fully covers specification *but not the [IDNA](https://www.unicode.org/reports/tr46/tr46-31.html)*
 - [x] Fast even without any 🦀 Rust code 🚀
 - [x] Basic API parsing functions so you build your own URL class 💪
@@ -16,7 +17,6 @@ Fast and *almost (97%)* [spec-compliant with whatwg-url](https://url.spec.whatwg
 - [x] Absolute overkill that beats everyone else's implementations 😈
 
 And now about bad things:
-- [ ] [URLSearchParams class](https://url.spec.whatwg.org/#interface-urlsearchparams) is not implemented \*yet\*
 - [ ] Many fields may be `nil`, while in Javascript they are always `string`
 - [ ] `port` fields is a `number` instead of a `string`
 - [ ] Does not implement [IDNA](https://www.unicode.org/reports/tr46/tr46-31.html) by spec, but believe me it won't bother you
@@ -71,7 +71,8 @@ class URL
     -- Note: it is URL(url, base)
     new(url: string, base?: string)
     
-    -- If field does not exists, it will be nil
+    -- also calling tostring(...) with URL given will result in getting full url (aka .href)
+
     href: string -- full url
     origin: string? -- *readonly* origin of the url ¯\_(ツ)_/¯
     scheme: string? -- just a plain scheme
@@ -83,8 +84,8 @@ class URL
     port: number?
     pathname: string?
     query: string?
-    search: string? -- a query with '?' prepended
-    searchParams: nil -- is not implemented
+    search: string -- a query with '?' prepended
+    searchParams: URLSearchParams -- *readonly*
     fragment: string?
     hash: string? -- a fragment with '#' prepended
 
@@ -98,6 +99,46 @@ bool URL.canParse(url: string, base?: string)
 
 -- Returns true if given obj is URL
 bool IsURL(obj: any)
+
+class URLSearchParams
+    -- if `init` is table, then it must be a list that consists of tables 
+    -- that have two value, name and value
+    -- e.g. { {"name", "value"}, {"foo", "bar"}, {"good"} }
+    -- Note: it is URLSearchParams(init, url)
+    new(init: string/table/nil, url: URL?)
+
+    -- also calling tostring(...) with URLSearchParams given will result in getting serialized query
+
+    -- appends name and value to the end
+    append(name: string, value: string?)
+    -- searches all parameters with given name, and deletes them
+    -- if `value` is given, then searches for exactly given name AND value
+    delete(name: string, value: string?)
+    -- finds first value associated with given name
+    string/nil get(name: string)
+    -- finds all values associated with given name and returns them as list
+    table getAll(name: string)
+    -- returns true if parameters with given name exists
+    -- and value if given
+    bool has(name: string, value: string?)
+    -- sets first name to a given value (or appends [name, value])
+    -- and deletes other parameters with the same name
+    set(name: string, value: string?)
+    -- sorts parameters inside URLSearchParams
+    sort() 
+
+    -- returns iterator that can be used in for loops
+    -- for example:
+    --
+    -- for k, v in searchParams:iterator()
+    --     ...
+    --
+    iterator iterator() -- key, value
+    iterator keys() -- key
+    iterator values() -- value
+
+-- Returns true if given obj is URLSearchParams
+bool IsURLSearchParams(obj: any)
 
 -- Percent-encode/decode methods 
 string encodeURI(uri: string) -- see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURI
@@ -117,11 +158,11 @@ interface URLState
     hostname: string/table/number/nil
     port: number?
     path: string/table/nil
-    query: string?
+    query: string/URLSearchParams/nil
     fragment: string?
 ```
 
-## About spec-compliancy
+## About spec-compliancy§
 The only part of this library that is not spec-compliant is [IDNA processing](https://www.unicode.org/reports/tr46/tr46-31.html) because I am too lazy to spend time on this.
 
 
