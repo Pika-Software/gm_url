@@ -108,6 +108,7 @@ class URLSearchParams
     new(init: string/table/nil, url: URL?)
 
     -- also calling tostring(...) with URLSearchParams given will result in getting serialized query
+    -- also '#' can be used to get a total count of parameters (e.g. #searchParams)
 
     -- appends name and value to the end
     append(name: string, value: string?)
@@ -162,7 +163,7 @@ interface URLState
     fragment: string?
 ```
 
-## About spec-compliancy§
+## About spec-compliancy
 The only part of this library that is not spec-compliant is [IDNA processing](https://www.unicode.org/reports/tr46/tr46-31.html) because I am too lazy to spend time on this.
 
 
