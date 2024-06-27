@@ -942,7 +942,7 @@ parseQueryString = (str, output=[]) ->
                 value = value and percentDecode(value, DECODE_LOOKUP_TABLE) or nil
                 count += 1
                 output[count] = [name, value]
-                
+
             name = value = nil
             startPos = pointer + 1
             if not ch -- EOF
@@ -1029,24 +1029,29 @@ serializeHost = (host) ->
     return host
 
 serializeQuery = (query) ->
-    if not istable query
+    unless istable(query)
         return query
 
-    output = {}
+    output, length = {}, 0
+
     for t in *query
-        name = t[1] and percentEncode(t[1], QUERY_ENCODE_SET, true) or ""
+        if length > 0
+            length += 1
+            output[length] = "&"
+
+        length += 1
+        output[length] = t[1] and percentEncode(t[1], QUERY_ENCODE_SET, true) or ""
+
         value = t[2] and percentEncode(t[2], QUERY_ENCODE_SET, true) or ""
-
-        if #output > 0
-            output[] = "&"
-        
-        output[] = name
         if value != ""
-            output[] = "="
-            output[] = value
+            length += 1
+            output[length] = "="
 
-    output = concat(output, "")
-    return #output != 0 and output or nil
+            length += 1
+            output[length] = value
+
+    if length != 0
+        return concat(output, "", 1, length)
 
 export serialize = (excludeFragment) =>
     scheme = @scheme
@@ -1056,39 +1061,69 @@ export serialize = (excludeFragment) =>
     fragment = @fragment
     isOpaque = isstring(path)
 
-    output = []
+    output, length = [], 0
+
     if scheme
-        output[] = scheme
-        output[] = ":"
+        length += 1
+        output[length] = scheme
+
+        length += 1
+        output[length] = ":"
+
     if hostname
-        output[] = "//"
+        length += 1
+        output[length] = "//"
+
         username = @username
         password = @password
+
         if username or password
-            output[] = username
+            length += 1
+            output[length] = username
+
             if password and password != ""
-                output[] = ":"
-                output[] = password
-            output[] = "@"
-        output[] = serializeHost(hostname)
+                length += 1
+                output[length] = ":"
+
+                length += 1
+                output[length] = password
+
+            length += 1
+            output[length] = "@"
+
+        length += 1
+        output[length] = serializeHost(hostname)
+
         if port := @port
-            output[] = ":"
-            output[] = tostring(port)
+            length += 1
+            output[length] = ":"
+
+            length += 1
+            output[length] = tostring(port)
+
     elseif path and not isOpaque and #path > 1 and path[1] == ""
-        output[] = "./"
+        length += 1
+        output[length] = "./"
 
     if path
-        output[] = isOpaque and path or "/" .. concat(path, "/")
+        length += 1
+        output[length] = isOpaque and path or "/" .. concat(path, "/")
 
-    if query
-        output[] = "?"
-        output[] = tostring(query)
+    if query and #query != 0
+        length += 1
+        output[length] = "?"
+
+        length += 1
+        output[length] = tostring(query) or ""
 
     if fragment and excludeFragment != true
-        output[] = "#"
-        output[] = fragment
+        length += 1
+        output[length] = "#"
 
-    return concat(output, "")
+        length += 1
+        output[length] = fragment
+
+    return concat(output, "", 1, length)
 
 getOrigin = =>
     switch @scheme
@@ -1125,7 +1160,7 @@ export class URLSearchParams
             -- yeah, URLState.query may be a string or URLSearchParams
             -- when we access URL.searchParams, it will look for URLState.query
             @url.state.query = @
-    
+
     __tostring: => serializeQuery(@)
 
     update = =>
@@ -1147,14 +1182,14 @@ export class URLSearchParams
         for t in *list
             if t[1] == name
                 return t[2]
-    
+
     getAll: (list, name) ->
         values = []
         for t in *list
             if t[1] == name
                 values[] = t[2]
         return values
-    
+
     has: (list, name, value) ->
         for t in *list
             if t[1] == name and (not value or t[2] == value)
@@ -1183,13 +1218,13 @@ export class URLSearchParams
             for j = i + 1, #list
                 if list[j][1] < list[jMin][1]
                     jMin = j
-            
+
             if jMin != i
                 old = list[i]
                 list[i] = list[jMin]
                 list[jMin] = old
         update(list)
-    
+
     iterator: (list) ->
         i = 0
         return ->
@@ -1203,7 +1238,7 @@ export class URLSearchParams
             i += 1
             t = list[i]
             if t then return t[1]
-    
+
     values: (list) ->
         i = 0
         return ->
@@ -1346,4 +1381,3 @@ export class URL
 export IsURL = ( any ) ->
     metatable = getmetatable( any )
     return metatable and metatable.__class == URL
-
