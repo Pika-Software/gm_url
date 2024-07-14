@@ -356,7 +356,6 @@ parseIPv6 = (str, startPos, endPos) ->
     pointer = startPos
     pieceIndex = 1
     compress = nil
-    dotSeen = false
 
     if byte(str, startPos) == 0x3A -- ':'
         if startPos == endPos --[[ EOF ]] or byte(str, startPos + 1) != 0x3A -- ':'
@@ -514,9 +513,9 @@ domainToASCII = (domain) ->
     while true
         ch = byte(domain, pointer)
         if not ch or ch == 0x2E -- '.'
-            if punycodePrefix == 4
-                -- decode an find errors
-                if containsNonASCII then error "Invalid URL: Domain invalid code point"
+            -- decode an find errors
+            if punycodePrefix == 4 and containsNonASCII
+                error "Invalid URL: Domain invalid code point"
 
             domainPart = containsNonASCII and "xn--" .. punycodeEncode(domain, partStart, pointer - 1) or sub(domain, partStart, pointer - 1)
             -- btw, punycode decode lowercases the domain, so we need to lowercase it
@@ -590,7 +589,7 @@ parseScheme = (str, startPos, endPos, base, stateOverride) =>
                     if isUrlSpecial and not isSpecial then return
                     if not isUrlSpecial and isSpecial then return
                     if @username or @password or @port and isSpecial == true then return
-                    if isUrlSpecial == true and not @hostname == "" then return
+                    if isUrlSpecial == true and @hostname != "" then return
 
                 @scheme = scheme
 
@@ -1040,9 +1039,9 @@ serializeQuery = (query) ->
             output[length] = "&"
 
         length += 1
-        output[length] = t[1] and percentEncode(t[1], QUERY_ENCODE_SET, true) or ""
+        output[length] = t[1] and percentEncode(t[1], URLENCODED_ENCODE_SET, true) or ""
 
-        value = t[2] and percentEncode(t[2], QUERY_ENCODE_SET, true) or ""
+        value = t[2] and percentEncode(t[2], URLENCODED_ENCODE_SET, true) or ""
         if value != ""
             length += 1
             output[length] = "="
@@ -1203,11 +1202,13 @@ export class URLSearchParams
                 -- replace first value
                 t[2] = value
                 -- remove all other values
-                for i = #list, i + 1, -1
-                    if list[i][1] == name
-                        remove(list, i)
+                for j = #list, i + 1, -1
+                    if list[j][1] == name
+                        remove(list, j)
+    
                 update(list)
                 return
+
         -- if name is not found, append new value
         list[] = [name, value]
         update(list)
@@ -1360,9 +1361,9 @@ export class URL
                 parseHost(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], "host")
             when "pathname"
                 if isstring(state.path)
-                    return
+                    return -- cannot set pathname when path is opaque
                 resetCache(@)
-                path = {}
+                state.path = {}
                 parsePathStart(state, value, 1, #value, state.scheme and SPECIAL_SCHEMAS[state.scheme], true)
             when "search"
                 resetCache(@)
